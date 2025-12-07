@@ -10,7 +10,7 @@ from collections import OrderedDict
 from utils.helpers import load_pretrained,load_pretrained_pos_emb
 from models.custom_moe_layer import FMoETransformerMLP
 # from .layers import DropPath, to_2tuple, trunc_normal_
-from timm.models.layers  import lecun_normal_
+from timm.layers  import lecun_normal_
 # from ..builder import BACKBONES
 import numpy as np
 from collections import Counter

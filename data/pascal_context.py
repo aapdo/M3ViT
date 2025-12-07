@@ -343,7 +343,7 @@ class PASCALContext(data.Dataset):
         labels = sio.loadmat(os.path.join(self.root, 'pascal-context', 'trainval', self.im_ids[index] + '.mat'))
         labels = labels['LabelMap']
 
-        _normals = np.zeros(_tmp.shape, dtype=np.float)
+        _normals = np.zeros(_tmp.shape, dtype=np.float32)
 
         for x in np.unique(labels):
             if x in self.normals_valid_classes:

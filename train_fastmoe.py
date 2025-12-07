@@ -150,11 +150,12 @@ args = parser.parse_args()
 
 if args.task_one_hot:
     args.one_by_one = True
-# print('os.environ["LOCAL_RANK"]',os.environ["LOCAL_RANK"],args.local_rank)
+
 if "LOCAL_RANK" not in os.environ:
     os.environ["LOCAL_RANK"] = str(args.local_rank)
     # print(os.environ["LOCAL_RANK"])
 
+print('os.environ["LOCAL_RANK"]: ',os.environ["LOCAL_RANK"],args.local_rank)
 
 
 def main():
@@ -189,10 +190,13 @@ def main():
     if args.multi_level is not None:
         p['multi_level'] = args.multi_level
     
+    if int(args.local_rank) < 0:
+        args.local_rank = int(os.environ["LOCAL_RANK"])
+
     args.distributed = False
     if args.local_rank >=0:
         args.distributed = True
-        print(os.environ["WORLD_SIZE"])
+        print('os.environ["WORLD_SIZE"]: ', os.environ["WORLD_SIZE"])
         print('args.local_rank',args.local_rank)
         args.world_size = int(os.environ["WORLD_SIZE"])
     if args.local_rank >=0:

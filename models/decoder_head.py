@@ -2,7 +2,7 @@ from abc import ABCMeta, abstractmethod
 
 import torch
 import torch.nn as nn
-from mmcv.cnn import normal_init
+from mmcv.cnn.utils.weight_init import normal_init
 from mmcv.runner import auto_fp16, force_fp32
 
 # from mmseg.core import build_pixel_sampler
