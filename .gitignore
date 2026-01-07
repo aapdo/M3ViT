@@ -135,3 +135,5 @@ Thumbs.db
 
 # Custom
 script.txt
+output_dir/
+env_setup/
