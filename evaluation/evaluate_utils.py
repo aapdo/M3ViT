@@ -275,6 +275,7 @@ def eval_model(p, val_loader, model):
 @torch.no_grad()
 def save_model_predictions(p, val_loader, model, args=None):
     """ Save model predictions for all tasks """
+    from utils.tracing import handle_forward_hook_data
 
     print('Save model predictions to {}'.format(p['save_dir']))
     model.eval()
@@ -283,7 +284,10 @@ def save_model_predictions(p, val_loader, model, args=None):
     for save_dir in save_dirs.values():
         mkdir_if_missing(save_dir)
 
-    for ii, sample in enumerate(val_loader):      
+    for ii, sample in enumerate(val_loader):
+        # Handle forward_hook data format
+        if args is not None:
+            sample = handle_forward_hook_data(args, sample)
         inputs, meta = sample['image'].cuda(non_blocking=True), sample['meta']
         img_size = (inputs.size(2), inputs.size(3))
 

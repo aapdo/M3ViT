@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from models.gate_funs.noisy_gate import NoisyGate
 from models.gate_funs.noisy_gate_vmoe import NoisyGate_VMoE
+from models.gates import NoisyGate_VMoE as Custom_NoisyGate_VMoE
 from models.custom_moe_layer import FMoETransformerMLP
 import torch.distributed
 import os
@@ -105,7 +106,7 @@ def read_specific_group_experts(moe_state_dict, rank, num_experts):
 def collect_noisy_gating_loss(model, weight):
     loss = 0
     for module in model.modules():
-        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE)) and module.has_loss:
+        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE) or isinstance(module, Custom_NoisyGate_VMoE)) and module.has_loss:
             # print(module)
             loss += module.get_loss()
     return loss * weight

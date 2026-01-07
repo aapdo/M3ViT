@@ -273,17 +273,17 @@ def get_head(p, backbone_channels, task):
 
     if p['head'] == 'deeplab':
         from models.aspp import DeepLabHead
-        return DeepLabHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
+        head = DeepLabHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
 
     elif p['head'] == 'hrnet':
         from models.seg_hrnet import HighResolutionHead
-        return HighResolutionHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
-    
+        head = HighResolutionHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
+
     elif p['head'] == 'VisionTransformerUpHead':
         from models.vit_up_head import VisionTransformerUpHead
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         hd_args = p['head_kwargs']
-        return VisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
+        head = VisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
             norm_cfg = norm_cfg, \
                 num_conv=hd_args['num_conv'], upsampling_method=hd_args['upsampling_method'],\
                 num_upsampe_layer=hd_args['num_upsampe_layer'], conv3x3_conv1x1=hd_args['conv3x3_conv1x1'],p=p,\
@@ -292,6 +292,9 @@ def get_head(p, backbone_channels, task):
 
     else:
         raise NotImplementedError
+
+    print(f'head[{task}]', head)
+    return head
 
 
 def get_model(p,args=None):
@@ -542,13 +545,13 @@ def get_val_dataloader(p, dataset):
 def build_train_dataloader(
     dataset, batch_size, workers_per_gpu, num_gpus=1, dist=True, **kwargs
 ):
-    shuffle = kwargs.get("shuffle", False)
+    shuffle = kwargs.get("shuffle", True)
     if dist:
         rank, world_size = get_dist_info()
         # if shuffle:
         #     sampler = DistributedGroupSampler(dataset, batch_size, world_size, rank)
         # else:
-        sampler = DistributedSampler(dataset, world_size, rank, shuffle=True)
+        sampler = DistributedSampler(dataset, world_size, rank, shuffle=shuffle)
         num_workers = workers_per_gpu
     else:
         trainloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True,

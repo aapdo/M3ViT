@@ -9,7 +9,7 @@ valBatch: 8
 nworkers: 4
 
 # Optimizer and scheduler
-epochs: 100
+epochs: 5
 optimizer: sgd
 optimizer_kwargs:
    lr: 0.002
@@ -87,11 +87,11 @@ task_dictionary:
 loss_kwargs:
    loss_scheme: baseline
    loss_weights:
-       semseg: 1.0
-       human_parts: 2.0
-       sal: 5.0
-       edge: 50.0
-       normals: 10.0
+      semseg: 1.0
+      human_parts: 2.0
+      sal: 5.0
+      edge: 50.0
+      normals: 10.0
 
 
 # Eval only final 10 epochs for speed-up

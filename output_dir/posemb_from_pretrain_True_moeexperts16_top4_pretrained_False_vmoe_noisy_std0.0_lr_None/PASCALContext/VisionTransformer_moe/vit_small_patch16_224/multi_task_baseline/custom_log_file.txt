@@ -1,0 +1,1535 @@
+Set CuDNN benchmark
+Set random seed to 0, deterministic: False
+{'setup': 'multi_task', 'train_db_name': 'PASCALContext', 'val_db_name': 'PASCALContext', 'trBatch': 8, 'valBatch': 8, 'nworkers': 4, 'epochs': 5, 'optimizer': 'sgd', 'optimizer_kwargs': {'lr': 0.002, 'momentum': 0.9, 'weight_decay': 0.0001}, 'scheduler': 'poly', 'model': 'baseline', 'model_kwargs': {'tam': True, 'tam_level0': False, 'tam_level1': False, 'tam_level2': False}, 'backbone': 'VisionTransformer_moe', 'backbone_kwargs': {'dilated': False, 'model_name': 'vit_small_patch16_224', 'img_size': [512, 512], 'patch_size': 16, 'in_chans': 3, 'embed_dim': 384, 'depth': 12, 'num_heads': 12, 'num_classes': 40, 'drop_rate': 0.0, 'pos_embed_interp': True, 'align_corners': False, 'mlp_ratio': 4.0, 'qkv_bias': 'True,', 'attn_drop_rate': 0.0, 'drop_path_rate': 0.0, 'random_init': False, 'distilled': False, 'moe_mlp_ratio': 1, 'moe_top_k': 4, 'gate_dim': 389, 'gate_return_decoupled_activation': False}, 'head': 'VisionTransformerUpHead', 'head_kwargs': {'in_channels': 1024, 'channels': 512, 'embed_dim': 384, 'img_size': [512, 512], 'align_corners': False, 'num_conv': 4, 'upsampling_method': 'bilinear', 'num_upsampe_layer': 4, 'num_classes': 40, 'in_index': 11, 'patch_size': 16, 'conv3x3_conv1x1': True}, 'task_dictionary': {'include_semseg': True, 'include_human_parts': False, 'include_sal': False, 'include_edge': False, 'include_normals': False, 'edge_w': 0.95}, 'loss_kwargs': {'loss_scheme': 'baseline', 'loss_weights': {'semseg': 1.0}}, 'eval_final_10_epochs_only': True, 'TASKS': {'NAMES': ['semseg'], 'NUM_OUTPUT': {'semseg': 21}, 'FLAGVALS': {'image': 2, 'semseg': 0}, 'INFER_FLAGVALS': {'semseg': 0}, 'SINGLE_TASK_TEST_DICT': {'semseg': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/single_task/semseg/results/PASCALContext_test_semseg.json'}, 'SINGLE_TASK_VAL_DICT': {'semseg': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/single_task/semseg/results/PASCALContext_val_semseg.json'}}, 'ALL_TASKS': {'NAMES': ['semseg'], 'NUM_OUTPUT': {'semseg': 21}, 'FLAGVALS': {'image': 2, 'semseg': 0}, 'INFER_FLAGVALS': {'semseg': 0}}, 'TRAIN': {'SCALE': (512, 512)}, 'TEST': {'SCALE': (512, 512)}, 'overfit': False, 'multi_level': False, 'root_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None', 'output_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline', 'save_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results', 'checkpoint': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/checkpoint.pth.tar', 'best_model': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/best_model.pth.tar', 'multi_gate': True, 'local_rank': 0, 'gpus': 2}
+Distributed training: True
+torch.backends.cudnn.benchmark: True
+Namespace(config_env='configs/env.yml', config_exp='configs/pascal/vit_moe/custom_pup_moe_vit_small_multi_task_baseline_onehot.yml', gpus=1, launcher='pytorch', local_rank=0, seed=0, deterministic=False, moe_data_distributed=False, moe_experts=16, moe_mlp_ratio=1, moe_top_k=4, trBatch=None, valBatch=None, moe_gate_arch='', moe_gate_type='noisy_vmoe', vmoe_noisy_std=0.0, backbone_random_init=False, pretrained='', moe_noisy_gate_loss_weight=0.01, pos_emb_from_pretrained='True', lr=None, one_by_one=False, task_one_hot=False, multi_gate=True, eval=False, flops=False, ckp=None, save_dir='/home/jy/m3vit/output_dir', gate_task_specific_dim=-1, regu_experts_fromtask=False, num_experts_pertask=-1, gate_input_ahead=False, regu_sem=False, semregu_loss_weight=0.01, sem_force=False, warmup_epochs=5, epochs=None, regu_subimage=False, subimageregu_weight=0.01, multi_level=None, opt=None, weight_decay=0.0001, expert_prune=False, tam_level0=None, tam_level1=None, tam_level2=None, resume='', time=False, forward_hook=False, num_tasks=1, distributed=True, world_size=2)
+Retrieve model
+/usr/local/lib/python3.10/dist-packages/mmcv/__init__.py:20: UserWarning: On January 1, 2023, MMCV will release v2.0.0, in which it will remove components related to the training process and add a data transformation module. In addition, it will rename the package names mmcv to mmcv-lite and mmcv-full to mmcv. See https://github.com/open-mmlab/mmcv/blob/master/docs/en/compatibility.md for more details.
+  warnings.warn(
+================================================================================
+Creating: models.vision_transformer_moe.VisionTransformerMoE
+  Arguments:
+    model_name: vit_small_patch16_224
+    img_size: [512, 512]
+    patch_size: 16
+    in_chans: 3
+    embed_dim: 384
+    depth: 12
+    num_heads: 12
+    num_classes: 40
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    representation_size: None
+    distilled: False
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    hybrid_backbone: None
+    norm_cfg: {'type': 'SyncBN', 'requires_grad': True}
+    pos_embed_interp: True
+    random_init: False
+    align_corners: False
+    act_layer: None
+    weight_init: 
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    world_size: 2
+    gate_dim: 389
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+set expert prune as  False
+================================================================================
+Creating: models.vision_transformer_moe.PatchEmbed
+  Arguments:
+    img_size: [512, 512]
+    patch_size: 16
+    in_chans: 3
+    embed_dim: 384
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Mlp
+  Arguments:
+    in_features: 384
+    hidden_features: 1536
+    act_layer: <class 'torch.nn.modules.activation.GELU'>
+    drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+    moe: True
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    moe_gate_dim: 389
+    world_size: 2
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Mlp
+  Arguments:
+    in_features: 384
+    hidden_features: 1536
+    act_layer: <class 'torch.nn.modules.activation.GELU'>
+    drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+    moe: True
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    moe_gate_dim: 389
+    world_size: 2
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Mlp
+  Arguments:
+    in_features: 384
+    hidden_features: 1536
+    act_layer: <class 'torch.nn.modules.activation.GELU'>
+    drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+    moe: True
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    moe_gate_dim: 389
+    world_size: 2
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Mlp
+  Arguments:
+    in_features: 384
+    hidden_features: 1536
+    act_layer: <class 'torch.nn.modules.activation.GELU'>
+    drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+    moe: True
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    moe_gate_dim: 389
+    world_size: 2
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Mlp
+  Arguments:
+    in_features: 384
+    hidden_features: 1536
+    act_layer: <class 'torch.nn.modules.activation.GELU'>
+    drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+    moe: True
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    moe_gate_dim: 389
+    world_size: 2
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Mlp
+  Arguments:
+    in_features: 384
+    hidden_features: 1536
+    act_layer: <class 'torch.nn.modules.activation.GELU'>
+    drop: 0.0
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Block
+  Arguments:
+    dim: 384
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: True,
+    qk_scale: None
+    drop: 0.0
+    attn_drop: 0.0
+    drop_path: 0.0
+    norm_layer: functools.partial(<class 'torch.nn.modules.normalization.LayerNorm'>, eps=1e-06)
+    moe: True
+    moe_mlp_ratio: 1
+    moe_experts: 8
+    moe_top_k: 4
+    moe_gate_dim: 389
+    world_size: 2
+    gate_return_decoupled_activation: False
+    moe_gate_type: noisy_vmoe
+    vmoe_noisy_std: 0.0
+    gate_task_specific_dim: -1
+    multi_gate: True
+    regu_experts_fromtask: False
+    num_experts_pertask: -1
+    num_tasks: 1
+    gate_input_ahead: False
+    regu_sem: False
+    sem_force: False
+    regu_subimage: False
+    expert_prune: False
+================================================================================
+================================================================================
+Creating: models.vision_transformer_moe.Attention
+  Arguments:
+    dim: 384
+    num_heads: 12
+    qkv_bias: True,
+    qk_scale: None
+    attn_drop: 0.0
+    proj_drop: 0.0
+================================================================================
+=========pos emb is loaded from ================ https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth
+load pre-trained weight from imagenet21k
+loaded pos_embed shape torch.Size([1, 197, 384])
+torch.Size([1, 384, 14, 14])
+after interpolation torch.Size([1, 384, 32, 32])
+cls_token_weight torch.Size([1, 1, 384])
+============load model weights from============ https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth _IncompatibleKeys(missing_keys=['blocks.1.mlp.experts.w', 'blocks.1.mlp.output_experts.w', 'blocks.1.mlp.gate.0.w_gate', 'blocks.3.mlp.experts.w', 'blocks.3.mlp.output_experts.w', 'blocks.3.mlp.gate.0.w_gate', 'blocks.5.mlp.experts.w', 'blocks.5.mlp.output_experts.w', 'blocks.5.mlp.gate.0.w_gate', 'blocks.7.mlp.experts.w', 'blocks.7.mlp.output_experts.w', 'blocks.7.mlp.gate.0.w_gate', 'blocks.9.mlp.experts.w', 'blocks.9.mlp.output_experts.w', 'blocks.9.mlp.gate.0.w_gate', 'blocks.11.mlp.experts.w', 'blocks.11.mlp.output_experts.w', 'blocks.11.mlp.gate.0.w_gate'], unexpected_keys=['norm.weight', 'norm.bias', 'blocks.1.mlp.fc1.weight', 'blocks.1.mlp.fc1.bias', 'blocks.1.mlp.fc2.weight', 'blocks.1.mlp.fc2.bias', 'blocks.3.mlp.fc1.weight', 'blocks.3.mlp.fc1.bias', 'blocks.3.mlp.fc2.weight', 'blocks.3.mlp.fc2.bias', 'blocks.5.mlp.fc1.weight', 'blocks.5.mlp.fc1.bias', 'blocks.5.mlp.fc2.weight', 'blocks.5.mlp.fc2.bias', 'blocks.7.mlp.fc1.weight', 'blocks.7.mlp.fc1.bias', 'blocks.7.mlp.fc2.weight', 'blocks.7.mlp.fc2.bias', 'blocks.9.mlp.fc1.weight', 'blocks.9.mlp.fc1.bias', 'blocks.9.mlp.fc2.weight', 'blocks.9.mlp.fc2.bias', 'blocks.11.mlp.fc1.weight', 'blocks.11.mlp.fc1.bias', 'blocks.11.mlp.fc2.weight', 'blocks.11.mlp.fc2.bias'])
+backbone VisionTransformerMoE(
+  (patch_embed): PatchEmbed(
+    (proj): Conv2d(3, 384, kernel_size=(16, 16), stride=(16, 16))
+  )
+  (pos_drop): Dropout(p=0.0, inplace=False)
+  (blocks): Sequential(
+    (0): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): Mlp(
+        (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        (act): GELU(approximate='none')
+        (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        (drop): Dropout(p=0.0, inplace=False)
+      )
+    )
+    (1): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): TaskMoE(
+        k=4, noisy_gating=True
+        (experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (output_experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (activation): Sequential(
+          (0): GELU(approximate='none')
+          (1): Dropout(p=0.0, inplace=False)
+        )
+        (gate): ModuleList(
+          (0): NoisyGate_VMoE(
+            (softmax): Softmax(dim=1)
+          )
+        )
+      )
+      (mlp_drop): Dropout(p=0.0, inplace=False)
+    )
+    (2): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): Mlp(
+        (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        (act): GELU(approximate='none')
+        (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        (drop): Dropout(p=0.0, inplace=False)
+      )
+    )
+    (3): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): TaskMoE(
+        k=4, noisy_gating=True
+        (experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (output_experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (activation): Sequential(
+          (0): GELU(approximate='none')
+          (1): Dropout(p=0.0, inplace=False)
+        )
+        (gate): ModuleList(
+          (0): NoisyGate_VMoE(
+            (softmax): Softmax(dim=1)
+          )
+        )
+      )
+      (mlp_drop): Dropout(p=0.0, inplace=False)
+    )
+    (4): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): Mlp(
+        (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        (act): GELU(approximate='none')
+        (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        (drop): Dropout(p=0.0, inplace=False)
+      )
+    )
+    (5): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): TaskMoE(
+        k=4, noisy_gating=True
+        (experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (output_experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (activation): Sequential(
+          (0): GELU(approximate='none')
+          (1): Dropout(p=0.0, inplace=False)
+        )
+        (gate): ModuleList(
+          (0): NoisyGate_VMoE(
+            (softmax): Softmax(dim=1)
+          )
+        )
+      )
+      (mlp_drop): Dropout(p=0.0, inplace=False)
+    )
+    (6): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): Mlp(
+        (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        (act): GELU(approximate='none')
+        (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        (drop): Dropout(p=0.0, inplace=False)
+      )
+    )
+    (7): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): TaskMoE(
+        k=4, noisy_gating=True
+        (experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (output_experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (activation): Sequential(
+          (0): GELU(approximate='none')
+          (1): Dropout(p=0.0, inplace=False)
+        )
+        (gate): ModuleList(
+          (0): NoisyGate_VMoE(
+            (softmax): Softmax(dim=1)
+          )
+        )
+      )
+      (mlp_drop): Dropout(p=0.0, inplace=False)
+    )
+    (8): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): Mlp(
+        (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        (act): GELU(approximate='none')
+        (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        (drop): Dropout(p=0.0, inplace=False)
+      )
+    )
+    (9): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): TaskMoE(
+        k=4, noisy_gating=True
+        (experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (output_experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (activation): Sequential(
+          (0): GELU(approximate='none')
+          (1): Dropout(p=0.0, inplace=False)
+        )
+        (gate): ModuleList(
+          (0): NoisyGate_VMoE(
+            (softmax): Softmax(dim=1)
+          )
+        )
+      )
+      (mlp_drop): Dropout(p=0.0, inplace=False)
+    )
+    (10): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): Mlp(
+        (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        (act): GELU(approximate='none')
+        (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        (drop): Dropout(p=0.0, inplace=False)
+      )
+    )
+    (11): Block(
+      (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (attn): Attention(
+        (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        (attn_drop): Dropout(p=0.0, inplace=False)
+        (proj): Linear(in_features=384, out_features=384, bias=True)
+        (proj_drop): Dropout(p=0.0, inplace=False)
+      )
+      (drop_path): Identity()
+      (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+      (mlp): TaskMoE(
+        k=4, noisy_gating=True
+        (experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (output_experts): ParallelExperts(num_experts=16, input_size=384, output_size=384)
+        (activation): Sequential(
+          (0): GELU(approximate='none')
+          (1): Dropout(p=0.0, inplace=False)
+        )
+        (gate): ModuleList(
+          (0): NoisyGate_VMoE(
+            (softmax): Softmax(dim=1)
+          )
+        )
+      )
+      (mlp_drop): Dropout(p=0.0, inplace=False)
+    )
+  )
+  (pre_logits): Identity()
+)
+================================================================================
+Creating: models.vit_up_head.VisionTransformerUpHead
+  Arguments:
+    img_size: [512, 512]
+    patch_size: 16
+    embed_dim: 384
+    norm_cfg: {'type': 'SyncBN', 'requires_grad': True}
+    num_conv: 4
+    upsampling_method: bilinear
+    num_upsampe_layer: 4
+    conv3x3_conv1x1: True
+    p: {'setup': 'multi_task', 'train_db_name': 'PASCALContext', 'val_db_name': 'PASCALContext', 'trBatch': 8, 'valBatch': 8, 'nworkers': 4, 'epochs': 5, 'optimizer': 'sgd', 'optimizer_kwargs': {'lr': 0.002, 'momentum': 0.9, 'weight_decay': 0.0001}, 'scheduler': 'poly', 'model': 'baseline', 'model_kwargs': {'tam': True, 'tam_level0': False, 'tam_level1': False, 'tam_level2': False}, 'backbone': 'VisionTransformer_moe', 'backbone_kwargs': {'dilated': False, 'model_name': 'vit_small_patch16_224', 'img_size': [512, 512], 'patch_size': 16, 'in_chans': 3, 'embed_dim': 384, 'depth': 12, 'num_heads': 12, 'num_classes': 40, 'drop_rate': 0.0, 'pos_embed_interp': True, 'align_corners': False, 'mlp_ratio': 4.0, 'qkv_bias': 'True,', 'attn_drop_rate': 0.0, 'drop_path_rate': 0.0, 'random_init': False, 'distilled': False, 'moe_mlp_ratio': 1, 'moe_top_k': 4, 'gate_dim': 389, 'gate_return_decoupled_activation': False}, 'head': 'VisionTransformerUpHead', 'head_kwargs': {'in_channels': 1024, 'channels': 512, 'embed_dim': 384, 'img_size': [512, 512], 'align_corners': False, 'num_conv': 4, 'upsampling_method': 'bilinear', 'num_upsampe_layer': 4, 'num_classes': 40, 'in_index': 11, 'patch_size': 16, 'conv3x3_conv1x1': True}, 'task_dictionary': {'include_semseg': True, 'include_human_parts': False, 'include_sal': False, 'include_edge': False, 'include_normals': False, 'edge_w': 0.95}, 'loss_kwargs': {'loss_scheme': 'baseline', 'loss_weights': {'semseg': 1.0}}, 'eval_final_10_epochs_only': True, 'TASKS': {'NAMES': ['semseg'], 'NUM_OUTPUT': {'semseg': 21}, 'FLAGVALS': {'image': 2, 'semseg': 0}, 'INFER_FLAGVALS': {'semseg': 0}, 'SINGLE_TASK_TEST_DICT': {'semseg': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/single_task/semseg/results/PASCALContext_test_semseg.json'}, 'SINGLE_TASK_VAL_DICT': {'semseg': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/single_task/semseg/results/PASCALContext_val_semseg.json'}}, 'ALL_TASKS': {'NAMES': ['semseg'], 'NUM_OUTPUT': {'semseg': 21}, 'FLAGVALS': {'image': 2, 'semseg': 0}, 'INFER_FLAGVALS': {'semseg': 0}}, 'TRAIN': {'SCALE': (512, 512)}, 'TEST': {'SCALE': (512, 512)}, 'overfit': False, 'multi_level': False, 'root_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None', 'output_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline', 'save_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results', 'checkpoint': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/checkpoint.pth.tar', 'best_model': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/best_model.pth.tar', 'multi_gate': True, 'local_rank': 0, 'gpus': 2}
+    in_channels: 1024
+    channels: 512
+    in_index: 11
+    num_classes: 21
+    align_corners: False
+================================================================================
+self.h 32 self.w 32
+will consider multi level output in head False
+will consider tam in heads True
+head[semseg] VisionTransformerUpHead(
+  input_transform=None, ignore_index=255, align_corners=False
+  (dropout): Dropout2d(p=0.1, inplace=False)
+  (norm): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+  (conv_0): Conv2d(384, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+  (conv_1): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+  (conv_2): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+  (conv_3): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+  (conv_4): Conv2d(256, 21, kernel_size=(1, 1), stride=(1, 1))
+  (syncbn_fc_0): SyncBatchNorm(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (syncbn_fc_1): SyncBatchNorm(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (syncbn_fc_2): SyncBatchNorm(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (syncbn_fc_3): SyncBatchNorm(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+)
+================================================================================
+Creating: models.models.MultiTaskModel
+  Arguments:
+    backbone: VisionTransformerMoE module
+    decoders: ModuleDict module
+    tasks: ['semseg']
+    p: {'setup': 'multi_task', 'train_db_name': 'PASCALContext', 'val_db_name': 'PASCALContext', 'trBatch': 8, 'valBatch': 8, 'nworkers': 4, 'epochs': 5, 'optimizer': 'sgd', 'optimizer_kwargs': {'lr': 0.002, 'momentum': 0.9, 'weight_decay': 0.0001}, 'scheduler': 'poly', 'model': 'baseline', 'model_kwargs': {'tam': True, 'tam_level0': False, 'tam_level1': False, 'tam_level2': False}, 'backbone': 'VisionTransformer_moe', 'backbone_kwargs': {'dilated': False, 'model_name': 'vit_small_patch16_224', 'img_size': [512, 512], 'patch_size': 16, 'in_chans': 3, 'embed_dim': 384, 'depth': 12, 'num_heads': 12, 'num_classes': 40, 'drop_rate': 0.0, 'pos_embed_interp': True, 'align_corners': False, 'mlp_ratio': 4.0, 'qkv_bias': 'True,', 'attn_drop_rate': 0.0, 'drop_path_rate': 0.0, 'random_init': False, 'distilled': False, 'moe_mlp_ratio': 1, 'moe_top_k': 4, 'gate_dim': 389, 'gate_return_decoupled_activation': False}, 'head': 'VisionTransformerUpHead', 'head_kwargs': {'in_channels': 1024, 'channels': 512, 'embed_dim': 384, 'img_size': [512, 512], 'align_corners': False, 'num_conv': 4, 'upsampling_method': 'bilinear', 'num_upsampe_layer': 4, 'num_classes': 40, 'in_index': 11, 'patch_size': 16, 'conv3x3_conv1x1': True}, 'task_dictionary': {'include_semseg': True, 'include_human_parts': False, 'include_sal': False, 'include_edge': False, 'include_normals': False, 'edge_w': 0.95}, 'loss_kwargs': {'loss_scheme': 'baseline', 'loss_weights': {'semseg': 1.0}}, 'eval_final_10_epochs_only': True, 'TASKS': {'NAMES': ['semseg'], 'NUM_OUTPUT': {'semseg': 21}, 'FLAGVALS': {'image': 2, 'semseg': 0}, 'INFER_FLAGVALS': {'semseg': 0}, 'SINGLE_TASK_TEST_DICT': {'semseg': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/single_task/semseg/results/PASCALContext_test_semseg.json'}, 'SINGLE_TASK_VAL_DICT': {'semseg': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/single_task/semseg/results/PASCALContext_val_semseg.json'}}, 'ALL_TASKS': {'NAMES': ['semseg'], 'NUM_OUTPUT': {'semseg': 21}, 'FLAGVALS': {'image': 2, 'semseg': 0}, 'INFER_FLAGVALS': {'semseg': 0}}, 'TRAIN': {'SCALE': (512, 512)}, 'TEST': {'SCALE': (512, 512)}, 'overfit': False, 'multi_level': False, 'root_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None', 'output_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline', 'save_dir': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results', 'checkpoint': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/checkpoint.pth.tar', 'best_model': '/home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/best_model.pth.tar', 'multi_gate': True, 'local_rank': 0, 'gpus': 2}
+================================================================================
+will consider tam in model True
+will consider multi level output in model False
+will consider multi gate output in model True
+Use fast moe distributed learning==================>>
+Get loss
+MultiTaskLoss(
+  (loss_ft): ModuleDict(
+    (semseg): SoftMaxwithLoss(
+      (softmax): LogSoftmax(dim=1)
+      (criterion): NLLLoss()
+    )
+  )
+)
+Retrieve optimizer
+Optimizer uses a single parameter group - (Default)
+optimizer SGD (
+Parameter Group 0
+    dampening: 0
+    differentiable: False
+    foreach: None
+    lr: 0.002
+    maximize: False
+    momentum: 0.9
+    nesterov: False
+    weight_decay: 0.0001
+)
+SGD (
+Parameter Group 0
+    dampening: 0
+    differentiable: False
+    foreach: None
+    lr: 0.002
+    maximize: False
+    momentum: 0.9
+    nesterov: False
+    weight_decay: 0.0001
+)
+Retrieve dataset
+Preparing train loader for db: PASCALContext
+Files already downloaded
+
+Initializing dataloader for PASCAL train set
+Number of dataset images: 4998
+Preparing val loader for db: PASCALContext
+Files already downloaded
+
+Initializing dataloader for PASCAL val set
+Number of dataset images: 5105
+Preparing val loader for db: PASCALContext
+Files already downloaded
+
+Initializing dataloader for PASCAL val set
+Number of dataset images: 5105
+Train samples 4998 - Val samples 5105
+Train transformations:
+Compose(
+    RandomHorizontalFlip
+    ScaleNRotate:(rot=(-20, 20),scale=(0.75, 1.25))
+    FixedResize:{'image': (512, 512), 'semseg': (512, 512)}
+    AddIgnoreRegions
+    ToTensor
+    Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
+)
+Val transformations:
+Compose(
+    FixedResize:{'image': (512, 512), 'semseg': (512, 512)}
+    AddIgnoreRegions
+    ToTensor
+    Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
+)
+No checkpoint file at /home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/checkpoint.pth.tar
+Starting main loop
+Epoch 1/5
+----------
+Adjusted learning rate to 0.00200
+Train ...
+Epoch: [0][  0/313]	Loss semseg 3.1654e+00 (3.1654e+00)	Loss Total 3.1654e+00 (3.1654e+00)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][ 25/313]	Loss semseg 9.4800e-01 (1.6717e+00)	Loss Total 9.4800e-01 (1.6717e+00)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][ 50/313]	Loss semseg 5.9169e-01 (1.3207e+00)	Loss Total 5.9169e-01 (1.3207e+00)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][ 75/313]	Loss semseg 8.7094e-01 (1.1715e+00)	Loss Total 8.7094e-01 (1.1715e+00)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][100/313]	Loss semseg 7.2166e-01 (1.0871e+00)	Loss Total 7.2166e-01 (1.0871e+00)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][125/313]	Loss semseg 9.5556e-01 (1.0276e+00)	Loss Total 9.5556e-01 (1.0276e+00)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][150/313]	Loss semseg 3.0042e-01 (9.7607e-01)	Loss Total 3.0042e-01 (9.7607e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][175/313]	Loss semseg 4.2529e-01 (9.2724e-01)	Loss Total 4.2529e-01 (9.2724e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][200/313]	Loss semseg 8.5395e-01 (8.9354e-01)	Loss Total 8.5395e-01 (8.9354e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][225/313]	Loss semseg 4.6401e-01 (8.6581e-01)	Loss Total 4.6401e-01 (8.6581e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][250/313]	Loss semseg 8.8693e-01 (8.3909e-01)	Loss Total 8.8693e-01 (8.3909e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][275/313]	Loss semseg 5.8608e-01 (8.1787e-01)	Loss Total 5.8608e-01 (8.1787e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [0][300/313]	Loss semseg 9.5355e-01 (8.0014e-01)	Loss Total 9.5355e-01 (8.0014e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+
+Semantic Segmentation mIoU: 17.6703
+
+background          81.4405
+aeroplane           28.0178
+bicycle             7.7464
+bird                20.5273
+boat                1.8252
+bottle              0.0012
+bus                 18.7086
+car                 30.8929
+cat                 39.2739
+chair               0.8624
+cow                 0.8526
+diningtable         0.6750
+dog                 23.8278
+horse               13.2784
+motorbike           22.9524
+person              55.5124
+pottedplant         0.0704
+sheep               2.5142
+sofa                7.7291
+train               12.7478
+tvmonitor           1.6211
+Evaluate ...
+Save model predictions to /home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results
+has saved samples 0 320
+has saved samples 50 320
+has saved samples 100 320
+has saved samples 150 320
+has saved samples 200 320
+has saved samples 250 320
+has saved samples 300 320
+p.TASKS.NAMES ['semseg']
+Files already downloaded
+
+Initializing dataloader for PASCAL val set
+Number of dataset images: 5105
+Evaluate the saved images (semseg)
+Evaluating: 0 of 5105 objects
+Evaluating: 50 of 5105 objects
+Evaluating: 100 of 5105 objects
+Evaluating: 150 of 5105 objects
+Evaluating: 200 of 5105 objects
+Evaluating: 250 of 5105 objects
+Evaluating: 300 of 5105 objects
+Evaluating: 350 of 5105 objects
+Evaluating: 400 of 5105 objects
+Evaluating: 450 of 5105 objects
+Evaluating: 500 of 5105 objects
+Evaluating: 550 of 5105 objects
+Evaluating: 600 of 5105 objects
+Evaluating: 650 of 5105 objects
+Evaluating: 700 of 5105 objects
+Evaluating: 750 of 5105 objects
+Evaluating: 800 of 5105 objects
+Evaluating: 850 of 5105 objects
+Evaluating: 900 of 5105 objects
+Evaluating: 950 of 5105 objects
+Evaluating: 1000 of 5105 objects
+Evaluating: 1050 of 5105 objects
+Evaluating: 1100 of 5105 objects
+Evaluating: 1150 of 5105 objects
+Evaluating: 1200 of 5105 objects
+Evaluating: 1250 of 5105 objects
+Evaluating: 1300 of 5105 objects
+Evaluating: 1350 of 5105 objects
+Evaluating: 1400 of 5105 objects
+Evaluating: 1450 of 5105 objects
+Evaluating: 1500 of 5105 objects
+Evaluating: 1550 of 5105 objects
+Evaluating: 1600 of 5105 objects
+Evaluating: 1650 of 5105 objects
+Evaluating: 1700 of 5105 objects
+Evaluating: 1750 of 5105 objects
+Evaluating: 1800 of 5105 objects
+Evaluating: 1850 of 5105 objects
+Evaluating: 1900 of 5105 objects
+Evaluating: 1950 of 5105 objects
+Evaluating: 2000 of 5105 objects
+Evaluating: 2050 of 5105 objects
+Evaluating: 2100 of 5105 objects
+Evaluating: 2150 of 5105 objects
+Evaluating: 2200 of 5105 objects
+Evaluating: 2250 of 5105 objects
+Evaluating: 2300 of 5105 objects
+Evaluating: 2350 of 5105 objects
+Evaluating: 2400 of 5105 objects
+Evaluating: 2450 of 5105 objects
+Evaluating: 2500 of 5105 objects
+Evaluating: 2550 of 5105 objects
+Evaluating: 2600 of 5105 objects
+Evaluating: 2650 of 5105 objects
+Evaluating: 2700 of 5105 objects
+Evaluating: 2750 of 5105 objects
+Evaluating: 2800 of 5105 objects
+Evaluating: 2850 of 5105 objects
+Evaluating: 2900 of 5105 objects
+Evaluating: 2950 of 5105 objects
+Evaluating: 3000 of 5105 objects
+Evaluating: 3050 of 5105 objects
+Evaluating: 3100 of 5105 objects
+Evaluating: 3150 of 5105 objects
+Evaluating: 3200 of 5105 objects
+Evaluating: 3250 of 5105 objects
+Evaluating: 3300 of 5105 objects
+Evaluating: 3350 of 5105 objects
+Evaluating: 3400 of 5105 objects
+Evaluating: 3450 of 5105 objects
+Evaluating: 3500 of 5105 objects
+Evaluating: 3550 of 5105 objects
+Evaluating: 3600 of 5105 objects
+Evaluating: 3650 of 5105 objects
+Evaluating: 3700 of 5105 objects
+Evaluating: 3750 of 5105 objects
+Evaluating: 3800 of 5105 objects
+Evaluating: 3850 of 5105 objects
+Evaluating: 3900 of 5105 objects
+Evaluating: 3950 of 5105 objects
+Evaluating: 4000 of 5105 objects
+Evaluating: 4050 of 5105 objects
+Evaluating: 4100 of 5105 objects
+Evaluating: 4150 of 5105 objects
+Evaluating: 4200 of 5105 objects
+Evaluating: 4250 of 5105 objects
+Evaluating: 4300 of 5105 objects
+Evaluating: 4350 of 5105 objects
+Evaluating: 4400 of 5105 objects
+Evaluating: 4450 of 5105 objects
+Evaluating: 4500 of 5105 objects
+Evaluating: 4550 of 5105 objects
+Evaluating: 4600 of 5105 objects
+Evaluating: 4650 of 5105 objects
+Evaluating: 4700 of 5105 objects
+Evaluating: 4750 of 5105 objects
+Evaluating: 4800 of 5105 objects
+Evaluating: 4850 of 5105 objects
+Evaluating: 4900 of 5105 objects
+Evaluating: 4950 of 5105 objects
+Evaluating: 5000 of 5105 objects
+Evaluating: 5050 of 5105 objects
+Evaluating: 5100 of 5105 objects
+
+Semantic Segmentation mIoU: 33.1345
+
+background     84.6846
+aeroplane      41.0812
+bicycle        32.6152
+bird           43.8012
+boat           25.7224
+bottle         0.2590
+bus            35.9347
+car            41.4243
+cat            57.8314
+chair          2.1297
+cow            21.6948
+diningtable    15.4185
+dog            44.9368
+horse          28.4181
+motorbike      44.9231
+person         65.4381
+pottedplant    25.4634
+sheep          13.6108
+sofa           13.4586
+train          29.0068
+tvmonitor      27.9719
+data set processed is  PASCALContext
+single_task_test_dict:  0.662
+Multi-task learning performance on test set is -49.95
+New best semgentation model 0.00 -> 33.13
+Checkpoint ...
+Epoch 2/5
+----------
+Adjusted learning rate to 0.00164
+Train ...
+Epoch: [1][  0/313]	Loss semseg 3.4138e-01 (3.4138e-01)	Loss Total 3.4138e-01 (3.4138e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][ 25/313]	Loss semseg 5.6411e-01 (5.3590e-01)	Loss Total 5.6411e-01 (5.3590e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][ 50/313]	Loss semseg 2.9949e-01 (5.2086e-01)	Loss Total 2.9949e-01 (5.2086e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][ 75/313]	Loss semseg 5.7293e-01 (5.1445e-01)	Loss Total 5.7293e-01 (5.1445e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][100/313]	Loss semseg 3.7509e-01 (5.0907e-01)	Loss Total 3.7509e-01 (5.0907e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][125/313]	Loss semseg 7.1002e-01 (5.0933e-01)	Loss Total 7.1002e-01 (5.0933e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][150/313]	Loss semseg 2.0382e-01 (5.0407e-01)	Loss Total 2.0382e-01 (5.0407e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][175/313]	Loss semseg 3.7906e-01 (4.9343e-01)	Loss Total 3.7906e-01 (4.9343e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][200/313]	Loss semseg 6.2314e-01 (4.8523e-01)	Loss Total 6.2314e-01 (4.8523e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][225/313]	Loss semseg 3.4774e-01 (4.8333e-01)	Loss Total 3.4774e-01 (4.8333e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][250/313]	Loss semseg 1.0172e+00 (4.8136e-01)	Loss Total 1.0172e+00 (4.8136e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][275/313]	Loss semseg 5.4904e-01 (4.7676e-01)	Loss Total 5.4904e-01 (4.7676e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [1][300/313]	Loss semseg 6.3333e-01 (4.7645e-01)	Loss Total 6.3333e-01 (4.7645e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+
+Semantic Segmentation mIoU: 38.6488
+
+background          86.7489
+aeroplane           56.9721
+bicycle             38.5325
+bird                49.1971
+boat                27.8363
+bottle              2.1013
+bus                 46.5920
+car                 57.2914
+cat                 67.5159
+chair               8.6928
+cow                 9.9047
+diningtable         14.3995
+dog                 52.4566
+horse               35.2957
+motorbike           44.9822
+person              67.2723
+pottedplant         24.8706
+sheep               30.6190
+sofa                27.9965
+train               39.8793
+tvmonitor           22.4677
+Evaluate ...
+Save model predictions to /home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results
+has saved samples 0 320
+has saved samples 50 320
+has saved samples 100 320
+has saved samples 150 320
+has saved samples 200 320
+has saved samples 250 320
+has saved samples 300 320
+p.TASKS.NAMES ['semseg']
+Files already downloaded
+
+Initializing dataloader for PASCAL val set
+Number of dataset images: 5105
+Evaluate the saved images (semseg)
+Evaluating: 0 of 5105 objects
+Evaluating: 50 of 5105 objects
+Evaluating: 100 of 5105 objects
+Evaluating: 150 of 5105 objects
+Evaluating: 200 of 5105 objects
+Evaluating: 250 of 5105 objects
+Evaluating: 300 of 5105 objects
+Evaluating: 350 of 5105 objects
+Evaluating: 400 of 5105 objects
+Evaluating: 450 of 5105 objects
+Evaluating: 500 of 5105 objects
+Evaluating: 550 of 5105 objects
+Evaluating: 600 of 5105 objects
+Evaluating: 650 of 5105 objects
+Evaluating: 700 of 5105 objects
+Evaluating: 750 of 5105 objects
+Evaluating: 800 of 5105 objects
+Evaluating: 850 of 5105 objects
+Evaluating: 900 of 5105 objects
+Evaluating: 950 of 5105 objects
+Evaluating: 1000 of 5105 objects
+Evaluating: 1050 of 5105 objects
+Evaluating: 1100 of 5105 objects
+Evaluating: 1150 of 5105 objects
+Evaluating: 1200 of 5105 objects
+Evaluating: 1250 of 5105 objects
+Evaluating: 1300 of 5105 objects
+Evaluating: 1350 of 5105 objects
+Evaluating: 1400 of 5105 objects
+Evaluating: 1450 of 5105 objects
+Evaluating: 1500 of 5105 objects
+Evaluating: 1550 of 5105 objects
+Evaluating: 1600 of 5105 objects
+Evaluating: 1650 of 5105 objects
+Evaluating: 1700 of 5105 objects
+Evaluating: 1750 of 5105 objects
+Evaluating: 1800 of 5105 objects
+Evaluating: 1850 of 5105 objects
+Evaluating: 1900 of 5105 objects
+Evaluating: 1950 of 5105 objects
+Evaluating: 2000 of 5105 objects
+Evaluating: 2050 of 5105 objects
+Evaluating: 2100 of 5105 objects
+Evaluating: 2150 of 5105 objects
+Evaluating: 2200 of 5105 objects
+Evaluating: 2250 of 5105 objects
+Evaluating: 2300 of 5105 objects
+Evaluating: 2350 of 5105 objects
+Evaluating: 2400 of 5105 objects
+Evaluating: 2450 of 5105 objects
+Evaluating: 2500 of 5105 objects
+Evaluating: 2550 of 5105 objects
+Evaluating: 2600 of 5105 objects
+Evaluating: 2650 of 5105 objects
+Evaluating: 2700 of 5105 objects
+Evaluating: 2750 of 5105 objects
+Evaluating: 2800 of 5105 objects
+Evaluating: 2850 of 5105 objects
+Evaluating: 2900 of 5105 objects
+Evaluating: 2950 of 5105 objects
+Evaluating: 3000 of 5105 objects
+Evaluating: 3050 of 5105 objects
+Evaluating: 3100 of 5105 objects
+Evaluating: 3150 of 5105 objects
+Evaluating: 3200 of 5105 objects
+Evaluating: 3250 of 5105 objects
+Evaluating: 3300 of 5105 objects
+Evaluating: 3350 of 5105 objects
+Evaluating: 3400 of 5105 objects
+Evaluating: 3450 of 5105 objects
+Evaluating: 3500 of 5105 objects
+Evaluating: 3550 of 5105 objects
+Evaluating: 3600 of 5105 objects
+Evaluating: 3650 of 5105 objects
+Evaluating: 3700 of 5105 objects
+Evaluating: 3750 of 5105 objects
+Evaluating: 3800 of 5105 objects
+Evaluating: 3850 of 5105 objects
+Evaluating: 3900 of 5105 objects
+Evaluating: 3950 of 5105 objects
+Evaluating: 4000 of 5105 objects
+Evaluating: 4050 of 5105 objects
+Evaluating: 4100 of 5105 objects
+Evaluating: 4150 of 5105 objects
+Evaluating: 4200 of 5105 objects
+Evaluating: 4250 of 5105 objects
+Evaluating: 4300 of 5105 objects
+Evaluating: 4350 of 5105 objects
+Evaluating: 4400 of 5105 objects
+Evaluating: 4450 of 5105 objects
+Evaluating: 4500 of 5105 objects
+Evaluating: 4550 of 5105 objects
+Evaluating: 4600 of 5105 objects
+Evaluating: 4650 of 5105 objects
+Evaluating: 4700 of 5105 objects
+Evaluating: 4750 of 5105 objects
+Evaluating: 4800 of 5105 objects
+Evaluating: 4850 of 5105 objects
+Evaluating: 4900 of 5105 objects
+Evaluating: 4950 of 5105 objects
+Evaluating: 5000 of 5105 objects
+Evaluating: 5050 of 5105 objects
+Evaluating: 5100 of 5105 objects
+
+Semantic Segmentation mIoU: 44.9419
+
+background     85.9275
+aeroplane      48.0010
+bicycle        40.1355
+bird           53.9108
+boat           37.5742
+bottle         29.5721
+bus            57.9351
+car            51.4251
+cat            66.3598
+chair          7.0109
+cow            31.7833
+diningtable    22.1978
+dog            55.0902
+horse          38.8423
+motorbike      49.8898
+person         67.5348
+pottedplant    38.9513
+sheep          47.4843
+sofa           23.1428
+train          49.8962
+tvmonitor      41.1143
+data set processed is  PASCALContext
+single_task_test_dict:  0.662
+Multi-task learning performance on test set is -32.11
+New best semgentation model 33.13 -> 44.94
+Checkpoint ...
+Epoch 3/5
+----------
+Adjusted learning rate to 0.00126
+Train ...
+Epoch: [2][  0/313]	Loss semseg 2.3505e-01 (2.3505e-01)	Loss Total 2.3505e-01 (2.3505e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][ 25/313]	Loss semseg 4.5297e-01 (4.1259e-01)	Loss Total 4.5297e-01 (4.1259e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][ 50/313]	Loss semseg 2.2464e-01 (3.9797e-01)	Loss Total 2.2464e-01 (3.9797e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][ 75/313]	Loss semseg 5.4809e-01 (3.9872e-01)	Loss Total 5.4809e-01 (3.9872e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][100/313]	Loss semseg 2.5086e-01 (4.0891e-01)	Loss Total 2.5086e-01 (4.0891e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][125/313]	Loss semseg 7.0251e-01 (4.1215e-01)	Loss Total 7.0251e-01 (4.1215e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][150/313]	Loss semseg 2.2139e-01 (4.0770e-01)	Loss Total 2.2139e-01 (4.0770e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][175/313]	Loss semseg 3.2974e-01 (3.9613e-01)	Loss Total 3.2974e-01 (3.9613e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][200/313]	Loss semseg 4.3412e-01 (3.9268e-01)	Loss Total 4.3412e-01 (3.9268e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][225/313]	Loss semseg 2.1960e-01 (3.9116e-01)	Loss Total 2.1960e-01 (3.9116e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][250/313]	Loss semseg 5.2664e-01 (3.8980e-01)	Loss Total 5.2664e-01 (3.8980e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][275/313]	Loss semseg 3.6079e-01 (3.8731e-01)	Loss Total 3.6079e-01 (3.8731e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [2][300/313]	Loss semseg 5.8836e-01 (3.8657e-01)	Loss Total 5.8836e-01 (3.8657e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+
+Semantic Segmentation mIoU: 49.0800
+
+background          88.2101
+aeroplane           63.9415
+bicycle             50.2106
+bird                61.3424
+boat                46.6941
+bottle              25.9396
+bus                 60.8270
+car                 63.1023
+cat                 76.1862
+chair               16.8313
+cow                 14.8529
+diningtable         26.2994
+dog                 63.9848
+horse               42.1397
+motorbike           55.1581
+person              70.5865
+pottedplant         31.8990
+sheep               54.5576
+sofa                35.5284
+train               53.3033
+tvmonitor           29.0859
+Evaluate ...
+Save model predictions to /home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results
+has saved samples 0 320
+has saved samples 50 320
+has saved samples 100 320
+has saved samples 150 320
+has saved samples 200 320
+has saved samples 250 320
+has saved samples 300 320
+p.TASKS.NAMES ['semseg']
+Files already downloaded
+
+Initializing dataloader for PASCAL val set
+Number of dataset images: 5105
+Evaluate the saved images (semseg)
+Evaluating: 0 of 5105 objects
+Evaluating: 50 of 5105 objects
+Evaluating: 100 of 5105 objects
+Evaluating: 150 of 5105 objects
+Evaluating: 200 of 5105 objects
+Evaluating: 250 of 5105 objects
+Evaluating: 300 of 5105 objects
+Evaluating: 350 of 5105 objects
+Evaluating: 400 of 5105 objects
+Evaluating: 450 of 5105 objects
+Evaluating: 500 of 5105 objects
+Evaluating: 550 of 5105 objects
+Evaluating: 600 of 5105 objects
+Evaluating: 650 of 5105 objects
+Evaluating: 700 of 5105 objects
+Evaluating: 750 of 5105 objects
+Evaluating: 800 of 5105 objects
+Evaluating: 850 of 5105 objects
+Evaluating: 900 of 5105 objects
+Evaluating: 950 of 5105 objects
+Evaluating: 1000 of 5105 objects
+Evaluating: 1050 of 5105 objects
+Evaluating: 1100 of 5105 objects
+Evaluating: 1150 of 5105 objects
+Evaluating: 1200 of 5105 objects
+Evaluating: 1250 of 5105 objects
+Evaluating: 1300 of 5105 objects
+Evaluating: 1350 of 5105 objects
+Evaluating: 1400 of 5105 objects
+Evaluating: 1450 of 5105 objects
+Evaluating: 1500 of 5105 objects
+Evaluating: 1550 of 5105 objects
+Evaluating: 1600 of 5105 objects
+Evaluating: 1650 of 5105 objects
+Evaluating: 1700 of 5105 objects
+Evaluating: 1750 of 5105 objects
+Evaluating: 1800 of 5105 objects
+Evaluating: 1850 of 5105 objects
+Evaluating: 1900 of 5105 objects
+Evaluating: 1950 of 5105 objects
+Evaluating: 2000 of 5105 objects
+Evaluating: 2050 of 5105 objects
+Evaluating: 2100 of 5105 objects
+Evaluating: 2150 of 5105 objects
+Evaluating: 2200 of 5105 objects
+Evaluating: 2250 of 5105 objects
+Evaluating: 2300 of 5105 objects
+Evaluating: 2350 of 5105 objects
+Evaluating: 2400 of 5105 objects
+Evaluating: 2450 of 5105 objects
+Evaluating: 2500 of 5105 objects
+Evaluating: 2550 of 5105 objects
+Evaluating: 2600 of 5105 objects
+Evaluating: 2650 of 5105 objects
+Evaluating: 2700 of 5105 objects
+Evaluating: 2750 of 5105 objects
+Evaluating: 2800 of 5105 objects
+Evaluating: 2850 of 5105 objects
+Evaluating: 2900 of 5105 objects
+Evaluating: 2950 of 5105 objects
+Evaluating: 3000 of 5105 objects
+Evaluating: 3050 of 5105 objects
+Evaluating: 3100 of 5105 objects
+Evaluating: 3150 of 5105 objects
+Evaluating: 3200 of 5105 objects
+Evaluating: 3250 of 5105 objects
+Evaluating: 3300 of 5105 objects
+Evaluating: 3350 of 5105 objects
+Evaluating: 3400 of 5105 objects
+Evaluating: 3450 of 5105 objects
+Evaluating: 3500 of 5105 objects
+Evaluating: 3550 of 5105 objects
+Evaluating: 3600 of 5105 objects
+Evaluating: 3650 of 5105 objects
+Evaluating: 3700 of 5105 objects
+Evaluating: 3750 of 5105 objects
+Evaluating: 3800 of 5105 objects
+Evaluating: 3850 of 5105 objects
+Evaluating: 3900 of 5105 objects
+Evaluating: 3950 of 5105 objects
+Evaluating: 4000 of 5105 objects
+Evaluating: 4050 of 5105 objects
+Evaluating: 4100 of 5105 objects
+Evaluating: 4150 of 5105 objects
+Evaluating: 4200 of 5105 objects
+Evaluating: 4250 of 5105 objects
+Evaluating: 4300 of 5105 objects
+Evaluating: 4350 of 5105 objects
+Evaluating: 4400 of 5105 objects
+Evaluating: 4450 of 5105 objects
+Evaluating: 4500 of 5105 objects
+Evaluating: 4550 of 5105 objects
+Evaluating: 4600 of 5105 objects
+Evaluating: 4650 of 5105 objects
+Evaluating: 4700 of 5105 objects
+Evaluating: 4750 of 5105 objects
+Evaluating: 4800 of 5105 objects
+Evaluating: 4850 of 5105 objects
+Evaluating: 4900 of 5105 objects
+Evaluating: 4950 of 5105 objects
+Evaluating: 5000 of 5105 objects
+Evaluating: 5050 of 5105 objects
+Evaluating: 5100 of 5105 objects
+
+Semantic Segmentation mIoU: 48.1074
+
+background     86.4025
+aeroplane      56.1985
+bicycle        43.0985
+bird           57.8110
+boat           42.2449
+bottle         36.1484
+bus            61.5298
+car            54.0110
+cat            68.0494
+chair          7.9770
+cow            31.0968
+diningtable    24.8785
+dog            58.3239
+horse          42.4634
+motorbike      51.1291
+person         68.6338
+pottedplant    42.0707
+sheep          54.3264
+sofa           27.0145
+train          55.3371
+tvmonitor      41.5110
+data set processed is  PASCALContext
+single_task_test_dict:  0.662
+Multi-task learning performance on test set is -27.33
+New best semgentation model 44.94 -> 48.11
+Checkpoint ...
+Epoch 4/5
+----------
+Adjusted learning rate to 0.00088
+Train ...
+Epoch: [3][  0/313]	Loss semseg 2.4784e-01 (2.4784e-01)	Loss Total 2.4784e-01 (2.4784e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][ 25/313]	Loss semseg 3.6149e-01 (3.5465e-01)	Loss Total 3.6149e-01 (3.5465e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][ 50/313]	Loss semseg 2.1094e-01 (3.4902e-01)	Loss Total 2.1094e-01 (3.4902e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][ 75/313]	Loss semseg 3.5258e-01 (3.4490e-01)	Loss Total 3.5258e-01 (3.4490e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][100/313]	Loss semseg 1.8548e-01 (3.5055e-01)	Loss Total 1.8548e-01 (3.5055e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][125/313]	Loss semseg 5.1901e-01 (3.5258e-01)	Loss Total 5.1901e-01 (3.5258e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][150/313]	Loss semseg 1.5820e-01 (3.4965e-01)	Loss Total 1.5820e-01 (3.4965e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][175/313]	Loss semseg 3.0711e-01 (3.4013e-01)	Loss Total 3.0711e-01 (3.4013e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][200/313]	Loss semseg 3.6163e-01 (3.3655e-01)	Loss Total 3.6163e-01 (3.3655e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][225/313]	Loss semseg 2.7928e-01 (3.3612e-01)	Loss Total 2.7928e-01 (3.3612e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][250/313]	Loss semseg 4.1828e-01 (3.3501e-01)	Loss Total 4.1828e-01 (3.3501e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][275/313]	Loss semseg 3.1914e-01 (3.3348e-01)	Loss Total 3.1914e-01 (3.3348e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+Epoch: [3][300/313]	Loss semseg 4.3576e-01 (3.3413e-01)	Loss Total 4.3576e-01 (3.3413e-01)	Loss Gating 0.0000e+00 (0.0000e+00)
+
+Semantic Segmentation mIoU: 55.6437
+
+background          89.3844
+aeroplane           69.1966
+bicycle             52.2343
+bird                65.3821
+boat                55.9748
+bottle              36.1706
+bus                 63.1094
+car                 70.5346
+cat                 79.6595
+chair               24.3030
+cow                 27.3413
+diningtable         31.6494
+dog                 70.4678
+horse               54.4222
+motorbike           59.8735
+person              72.7718
+pottedplant         40.3239
+sheep               64.4487
+sofa                39.1216
+train               63.5003
+tvmonitor           38.6477
+Evaluate ...
+Save model predictions to /home/jy/m3vit/output_dir/posemb_from_pretrain_True_moeexperts16_top4_pretrained_False_vmoe_noisy_std0.0_lr_None/PASCALContext/VisionTransformer_moe/vit_small_patch16_224/multi_task_baseline/results
+has saved samples 0 320
+has saved samples 50 320
+has saved samples 100 320
+has saved samples 150 320
+has saved samples 200 320
+has saved samples 250 320
+has saved samples 300 320
+p.TASKS.NAMES ['semseg']
+Files already downloaded
+
+Initializing dataloader for PASCAL val set
+Number of dataset images: 5105
+Evaluate the saved images (semseg)
+Evaluating: 0 of 5105 objects
+Evaluating: 50 of 5105 objects
+Evaluating: 100 of 5105 objects
+Evaluating: 150 of 5105 objects
+Evaluating: 200 of 5105 objects
+Evaluating: 250 of 5105 objects
+Evaluating: 300 of 5105 objects
+Traceback (most recent call last):
+  File "/home/jy/m3vit/train_fastmoe.py", line 556, in <module>
+    main()
+  File "/home/jy/m3vit/train_fastmoe.py", line 484, in main
+    curr_result = eval_all_results(p)
+  File "/home/jy/m3vit/evaluation/evaluate_utils.py", line 335, in eval_all_results
+    results['semseg'] = eval_semseg_predictions(database=p['val_db_name'],
+  File "/home/jy/m3vit/evaluation/eval_semseg.py", line 187, in eval_semseg_predictions
+    eval_results = eval_semseg(db, os.path.join(save_dir, 'semseg'), n_classes=n_classes, has_bg=has_bg)
+  File "/home/jy/m3vit/evaluation/eval_semseg.py", line 52, in eval_semseg
+    mask = np.array(Image.open(filename)).astype(np.float32)
+  File "/usr/local/lib/python3.10/dist-packages/PIL/Image.py", line 681, in __array_interface__
+    new["data"] = self.tobytes()
+  File "/usr/local/lib/python3.10/dist-packages/PIL/Image.py", line 740, in tobytes
+    self.load()
+  File "/usr/local/lib/python3.10/dist-packages/PIL/ImageFile.py", line 291, in load
+    n, err_code = decoder.decode(b)
+KeyboardInterrupt

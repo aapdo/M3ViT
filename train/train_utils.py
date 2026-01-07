@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import pickle
 from os.path import join
 from utils.moe_utils import collect_noisy_gating_loss,collect_semregu_loss, collect_regu_subimage_loss
+from utils.tracing import handle_forward_hook_data
 def get_loss_meters(p):
     """ Return dictionary with loss meters to monitor training """
     all_tasks = p.ALL_TASKS.NAMES
@@ -92,6 +93,7 @@ def get_loss_meters(p):
                 losses['level%s_%s'%(i,task)] = AverageMeter('At level %s Loss %s' %(i,task), ':.4e')
 
     losses['total'] = AverageMeter('Loss Total', ':.4e')
+    losses['gating'] = AverageMeter('Loss Gating', ':.4e')
     return losses
 
 def logits_aug(logits, low=0.01, high=9.99):
@@ -204,6 +206,7 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
     model.train()
     
     for i, batch in enumerate(train_loader):
+        batch = handle_forward_hook_data(args, batch) # Added line
         # Forward pass
         images = batch['image'].cuda(args.local_rank, non_blocking=True)
         targets = {task: batch[task].cuda(args.local_rank, non_blocking=True) for task in p.ALL_TASKS.NAMES}
@@ -221,11 +224,13 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
 
                 for k, v in loss_dict.items():
                     losses[k].update(v.item())
-                performance_meter.update({single_task: get_output(output[single_task], single_task)}, 
+                performance_meter.update({single_task: get_output(output[single_task], single_task)},
                                  {single_task: targets[single_task]})
-                
+
                 if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
-                    loss_dict['total'] += collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                    gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                    loss_dict['total'] += gating_loss
+                    losses['gating'].update(gating_loss)
                 # Backward
                 loss_dict['total'].backward()
             if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
@@ -242,9 +247,11 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             
             # Measure loss and performance
             loss_dict = criterion(output, targets)
-           
+
             if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
-                loss_dict['total'] += collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                loss_dict['total'] += gating_loss
+                losses['gating'].update(gating_loss)
                 # if args.regu_sem and epoch<args.warmup_epochs:
                 #     semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
                 #     loss_dict['total'] += semregu_loss

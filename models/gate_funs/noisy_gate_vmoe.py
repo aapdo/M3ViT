@@ -225,7 +225,6 @@ class NoisyGate_VMoE(BaseGate):
 
         if self.no_noise:
             noise_stddev *= 0
-
         noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
 
         if self.select_idx is not None:
@@ -279,7 +278,12 @@ class NoisyGate_VMoE(BaseGate):
                 load = self._gates_to_load(gates)
 
             importance = gates.sum(0)
-            loss = self.cv_squared(importance) + self.cv_squared(load)
+            # loss = self.cv_squared(importance) + self.cv_squared(load)
+
+            cv_imp = self.cv_squared(importance)
+            cv_load = self.cv_squared(load)
+            loss = cv_imp + cv_load
+            # print(f"NoisyGate_VMoE: cv_imp={cv_imp:.4f}, cv_load={cv_load:.4f}, importance={importance.tolist()}, load={load.tolist()}")
         else:
             loss = 0
 

@@ -15,9 +15,8 @@ class Logger(object):
         if fpath is not None and self.local_rank==0:
             if not os.path.exists(os.path.dirname(fpath)):
                 os.makedirs(os.path.dirname(fpath))
-                self.file = open(fpath, 'w')
-            else:
-                self.file = open(fpath, 'a')
+            # Always overwrite mode
+            self.file = open(fpath, 'w')
 
     def __del__(self):
         self.close()

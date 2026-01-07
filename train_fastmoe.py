@@ -32,6 +32,8 @@ import time
 import fmoe
 from thop import clever_format
 from thop import profile
+from utils.tracing import setup_forward_hooks, wrap_datasets_for_forward_hook, handle_forward_hook_data, \
+                            patch_and_log_initializations, restore_original_initializations
 def set_random_seed(seed, deterministic=False):
     """Set random seed.
 
@@ -146,6 +148,7 @@ parser.add_argument('--tam_level2',default=None, type=str2bool, help='use tamlev
 
 parser.add_argument('--resume', default='', help='resume from checkpoint')
 parser.add_argument('--time', action='store_true', help='if wanna get inference time')
+parser.add_argument('--forward_hook', default=False, type=str2bool, help='whether to enable forward hooks for layer output logging')
 args = parser.parse_args()
 
 if args.task_one_hot:
@@ -200,7 +203,9 @@ def main():
         print('args.local_rank',args.local_rank)
         args.world_size = int(os.environ["WORLD_SIZE"])
     if args.local_rank >=0:
-        sys.stdout = Logger(os.path.join(p['output_dir'], 'log_file.txt'),local_rank=args.local_rank)
+        logger = Logger(os.path.join(p['output_dir'], 'log_file.txt'),local_rank=args.local_rank)
+        sys.stdout = logger
+        sys.stderr = logger  # Also redirect stderr to capture errors
     if args.distributed:
         if args.launcher == "pytorch":
             torch.cuda.set_device(args.local_rank)
@@ -256,8 +261,23 @@ def main():
     
     print(colored('Retrieve model', 'blue'))
     args.moe_use_gate = (args.moe_gate_arch != "")
+
+    # Monkey patch to log all class initializations
+    try:
+        from models import vision_transformer_moe, custom_moe_layer, vit_up_head, models as models_module
+        from models.gate_funs import noisy_gate_vmoe, noisy_gate
+
+        modules_to_patch = [vision_transformer_moe, custom_moe_layer, noisy_gate_vmoe, noisy_gate, vit_up_head, models_module]
+        original_inits = patch_and_log_initializations(modules_to_patch, args)
+    except Exception as e:
+        print(f"Warning: Could not patch some modules for initialization logging: {e}")
+
     model = get_model(p,args)
-    
+
+    # Restore original __init__ methods
+    if 'original_inits' in locals(): # Check if patching actually happened
+        restore_original_initializations(modules_to_patch, original_inits)
+
     if not torch.cuda.is_available():
         raise NotImplementedError()
         log.info('using CPU, this will be slow')
@@ -291,6 +311,11 @@ def main():
     criterion.cuda(args.local_rank)
     print(criterion)
 
+    # Add forward hooks to print layer outputs (only if enabled)
+    hook_handles = []
+    if args.forward_hook:
+        hook_handles, args.batch_counter = setup_forward_hooks(model, args, p['output_dir'], criterion)
+
     # Optimizer
     print(colored('Retrieve optimizer', 'blue'))
     optimizer = get_optimizer(p, model, args)
@@ -298,14 +323,19 @@ def main():
 
     # Dataset
     print(colored('Retrieve dataset', 'blue'))
-    # Transforms 
+    # Transforms
     train_transforms, val_transforms = get_transformations(p)
     train_dataset = get_train_dataset(p, train_transforms)
     val_dataset = get_val_dataset(p, val_transforms)
-    true_val_dataset = get_val_dataset(p, None) # True validation dataset without reshape 
+    true_val_dataset = get_val_dataset(p, None) # True validation dataset without reshape
 
+    if args.forward_hook:
+        train_dataset, val_dataset = wrap_datasets_for_forward_hook(train_dataset, val_dataset)
+
+    # Disable shuffle when forward_hook is enabled for reproducibility
+    train_shuffle = not args.forward_hook
     train_dataloader = build_train_dataloader(
-        train_dataset, p['trBatch'], p['nworkers'], dist=args.distributed, shuffle=True)
+        train_dataset, p['trBatch'], p['nworkers'], dist=args.distributed, shuffle=train_shuffle)
     val_dataloader = build_val_dataloader(
         val_dataset, p['valBatch'], p['nworkers'], dist=args.distributed)
 
@@ -403,7 +433,18 @@ def main():
         start_epoch = 0
         if args.distributed:
             torch.distributed.barrier()
-        best_result = {'multi_task_performance':-200}  
+        # Initialize best_result based on task configuration
+        best_result = {'multi_task_performance': -200}
+        if len(p.TASKS.NAMES) == 1:
+            task = p.TASKS.NAMES[0]
+            if task == 'semseg' or task == 'human_parts' or task == 'sal':
+                best_result[task] = {'mIoU': 0.0}
+            elif task == 'depth':
+                best_result[task] = {'rmse': float('inf')}
+            elif task == 'normals':
+                best_result[task] = {'mean': float('inf')}
+            elif task == 'edge':
+                best_result[task] = {'odsF': 0.0}  
     
     # Main loop
     print(colored('Starting main loop', 'blue'))
@@ -433,10 +474,18 @@ def main():
         # Perform evaluation
         if eval_bool:
             print('Evaluate ...')
+            # Temporarily disable forward hooks during evaluation
+            if args.forward_hook and hasattr(args, 'batch_counter'):
+                args.batch_counter['enabled'] = False
+
             save_model_predictions(p, val_dataloader, model, args)
             if args.distributed:
                 torch.distributed.barrier()
             curr_result = eval_all_results(p)
+
+            # Re-enable forward hooks after evaluation
+            if args.forward_hook and hasattr(args, 'batch_counter'):
+                args.batch_counter['enabled'] = True
             # improves, best_result = validate_results_v2(p, curr_result, best_result)
             improves, best_result = validate_results(p, curr_result, best_result)
             print('Checkpoint ...')
@@ -454,7 +503,12 @@ def main():
         if args.distributed:
             torch.distributed.barrier()
 
-    torch.cuda.empty_cache()   
+    torch.cuda.empty_cache()
+
+    # Disable forward hooks for final evaluation
+    if args.forward_hook and hasattr(args, 'batch_counter'):
+        args.batch_counter['enabled'] = False
+
     # Evaluate best model at the end
     if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
         # state_dict = read_specific_group_experts(checkpoint['state_dict'], args.local_rank, args.moe_experts)

@@ -279,6 +279,7 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
 
     if pos_embed_interp:
         print('loaded pos_embed shape',state_dict['pos_embed'].shape)
+        # print(f"[Pretrained] before interp vit_state_dict['pos_embed'] (flattened): {state_dict['pos_embed'].flatten().tolist()}")
         n, c, hw = state_dict['pos_embed'].transpose(1, 2).shape
         h = w = int(math.sqrt(hw))
         pos_embed_weight = state_dict['pos_embed'][:, (-h * w):]
@@ -299,6 +300,7 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
         print('cls_token_weight', cls_token_weight.shape)
         state_dict['pos_embed'] = torch.cat(
             (cls_token_weight, pos_embed_weight), dim=1)
+        # print(f"[Pretrained] after interp vit_state_dict['pos_embed'] (flattened): {state_dict['pos_embed'].flatten().tolist()}")
     check = False
     if check:
         for i in [1,3,5,7,9,11]:

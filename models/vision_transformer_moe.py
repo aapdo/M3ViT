@@ -16,6 +16,10 @@ import numpy as np
 from collections import Counter
 from models.gate_funs.noisy_gate import NoisyGate
 from models.gate_funs.noisy_gate_vmoe import NoisyGate_VMoE
+from torch.utils.checkpoint import checkpoint
+
+from .gates import NoisyGate_VMoE as Custom_VMoE
+from models.moe import TaskMoE
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
 def _cfg(url='', **kwargs):
@@ -223,6 +227,87 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+# class Block(nn.Module):
+
+#     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+#                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
+#                  moe=False, moe_mlp_ratio=-1, moe_experts=64,
+#                  moe_top_k=2, moe_gate_dim=-1, world_size=1, gate_return_decoupled_activation=False,
+#                  moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False, 
+#                  regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1,
+#                  gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False):
+#         super().__init__()
+#         self.moe = moe
+#         self.norm1 = norm_layer(dim)
+#         self.attn = Attention(
+#             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+#         # NOTE: drop path for stochastic depth, we shall see if 
+#         self.drop_path = DropPath(
+#             drop_path) if drop_path > 0. else nn.Identity()
+#         self.norm2 = norm_layer(dim)
+#         mlp_hidden_dim = int(dim * mlp_ratio)
+#         self.gate_input_ahead = gate_input_ahead
+#         self.expert_prune = expert_prune
+#         if moe:
+#             activation = nn.Sequential(
+#                 act_layer(),
+#                 nn.Dropout(drop)
+#             )
+#             if moe_gate_dim < 0:
+#                 moe_gate_dim = dim
+#             if moe_mlp_ratio < 0:
+#                 moe_mlp_ratio = mlp_ratio
+#             moe_hidden_dim = int(dim * moe_mlp_ratio)
+
+#             if moe_gate_type == "noisy":
+#                 moe_gate_fun = NoisyGate
+#             elif moe_gate_type == "noisy_vmoe":
+#                 moe_gate_fun = Custom_VMoE
+#             else:
+#                 raise ValueError("unknow gate type of {}".format(moe_gate_type))
+
+#             # TaskMoE requires a list of gates (one per task)
+#             if num_tasks <= 0:
+#                 raise ValueError("num_tasks must be > 0 for TaskMoE")
+
+#             gates = [
+#                 moe_gate_fun(
+#                     d_model=dim,  # TaskMoE uses input_size as gate input
+#                     num_expert=16,
+#                     world_size=world_size,
+#                     top_k=4,
+#                     noise_std=vmoe_noisy_std if moe_gate_type == "noisy_vmoe" else 1.0
+#                 )
+#                 for _ in range(num_tasks)
+#             ]
+
+#             self.mlp = TaskMoE(
+#                 input_size=dim,
+#                 head_size=moe_hidden_dim,
+#                 num_experts=16,
+#                 k=4,
+#                 task_num=num_tasks,
+#                 noisy_gating=True,
+#                 activation=activation,
+#                 gates=gates
+#             )
+#             self.mlp_drop = nn.Dropout(drop)
+#         else:
+#             self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+    
+#     def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
+#         if self.gate_input_ahead: # False
+#             gate_inp = x
+#         x = x + self.drop_path(self.attn(self.norm1(x)))
+#         if not self.moe:
+#             x = x + self.drop_path(self.mlp(self.norm2(x)))
+#         else:
+#             # TaskMoE only needs x and task_id (task_bh parameter)
+#             if task_id is None:
+#                 raise ValueError("task_id must be provided for TaskMoE")
+#             x = x + self.drop_path(self.mlp_drop(self.mlp(self.norm2(x), task_bh=task_id)))
+#         return x
+
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
@@ -272,14 +357,28 @@ class Block(nn.Module):
         else:
             self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
     
-    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
-        if self.gate_input_ahead:
-            gate_inp = x
+    def _forward_with_attn_and_norm(self, x):
+        """Forward through norm1, attn, norm2 for checkpointing"""
         x = x + self.drop_path(self.attn(self.norm1(x)))
-        if not self.moe:
-            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        normed_x = self.norm2(x)
+        return x, normed_x
+
+    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
+        if self.gate_input_ahead: # False
+            gate_inp = x
+
+        # Checkpoint norm1 + attention + norm2
+        if self.training:
+            x, normed_x = checkpoint(self._forward_with_attn_and_norm, x, use_reentrant=False)
         else:
-            x = x + self.drop_path(self.mlp_drop(self.mlp(self.norm2(x), gate_inp, task_id, task_specific_feature, sem)))
+            x = x + self.drop_path(self.attn(self.norm1(x)))
+            normed_x = self.norm2(x)
+
+        # MoE mlp is not checkpointed
+        if not self.moe:
+            x = x + self.drop_path(self.mlp(normed_x))
+        else:
+            x = x + self.drop_path(self.mlp_drop(self.mlp(normed_x, gate_inp, task_id, task_specific_feature, sem)))
         return x
 
 class PatchEmbed(nn.Module):

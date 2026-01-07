@@ -1,0 +1,7 @@
+tmux new-session -d -s m3vit
+tmux attach -t m3vit
+
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=3351 train_fastmoe.py --config_env configs/env.yml --config_exp configs/pascal/vit_moe/pup_moe_vit_small_multi_task_baseline_onehot.yml --moe_gate_type "noisy_vmoe" --moe_experts 16 --moe_top_k 4 --pos_emb_from_pretrained True --backbone_random_init False --vmoe_noisy_std 0 --gate_task_specific_dim -1 --save_dir /home/jy/m3vit/output_dir --task_one_hot False --multi_gate True --moe_mlp_ratio 1 --forward_hook True
+nohup torchrun --nproc_per_node=2 --master_port=3351 train_fastmoe.py --config_env configs/env.yml --config_exp configs/pascal/vit_moe/pup_moe_vit_small_multi_task_baseline_onehot.yml --moe_gate_type "noisy_vmoe" --moe_experts 16 --moe_top_k 4 --pos_emb_from_pretrained True --backbone_random_init False --vmoe_noisy_std 0 --gate_task_specific_dim -1 --save_dir /home/jy/m3vit/output_dir --task_one_hot False --multi_gate True --moe_mlp_ratio 1 --forward_hook True > /dev/null 2>&1 &
+
+torchrun --nproc_per_node=2 --master_port=3351 train_fastmoe.py --config_env configs/env.yml --config_exp configs/pascal/vit_moe/custom_pup_moe_vit_small_multi_task_baseline_onehot.yml --moe_gate_type "noisy_vmoe" --moe_experts 16 --moe_top_k 4 --pos_emb_from_pretrained True --backbone_random_init False --vmoe_noisy_std 0 --gate_task_specific_dim -1 --save_dir /home/jy/m3vit/output_dir --task_one_hot False --multi_gate True --moe_mlp_ratio 1
