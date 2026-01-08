@@ -98,7 +98,7 @@ class NormalsMeter(object):
     def get_score(self, verbose=True):
         eval_result = dict()
         eval_result['mean'] = self.eval_dict['mean'] / self.eval_dict['n']
-        eval_result['rmse'] = self.eval_dict['mean'] / self.eval_dict['n']
+        eval_result['rmse'] = self.eval_dict['rmse'] / self.eval_dict['n']
         eval_result['11.25'] = self.eval_dict['11.25'] / self.eval_dict['n']
         eval_result['22.5'] = self.eval_dict['22.5'] / self.eval_dict['n']
         eval_result['30'] = self.eval_dict['30'] / self.eval_dict['n']

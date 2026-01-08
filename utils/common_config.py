@@ -166,7 +166,7 @@ def get_backbone(p, args=None):
         linear_keyword = 'head'
     
     elif p['backbone'] == 'VisionTransformer_moe':
-        from models.vision_transformer_moe import VisionTransformerMoE
+        from models.test_vision_transformer_moe import VisionTransformerMoE
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         bn_args = p['backbone_kwargs']
         if args.moe_data_distributed:
@@ -280,7 +280,7 @@ def get_head(p, backbone_channels, task):
         head = HighResolutionHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
 
     elif p['head'] == 'VisionTransformerUpHead':
-        from models.vit_up_head import VisionTransformerUpHead
+        from models.test_vit_up_head import VisionTransformerUpHead
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         hd_args = p['head_kwargs']
         head = VisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
@@ -311,7 +311,7 @@ def get_model(p,args=None):
 
     elif p['setup'] == 'multi_task':
         if p['model'] == 'baseline':
-            from models.models import MultiTaskModel
+            from models.test_models import MultiTaskModel
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
             model = MultiTaskModel(backbone, heads, p.TASKS.NAMES,p=p)
         

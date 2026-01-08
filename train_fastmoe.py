@@ -15,7 +15,7 @@ from utils.common_config import get_train_dataset, get_transformations,\
                                 get_optimizer, get_model, adjust_learning_rate,\
                                 get_criterion
 from utils.logger import Logger
-from train.train_utils import train_vanilla,train_vanilla_distributed
+from train.train_utils import train_vanilla,train_vanilla_distributed, test_train_vanilla_distributed
 from evaluation.evaluate_utils import eval_model, validate_results, save_model_predictions,\
                                     eval_all_results,validate_results_v2
 from termcolor import colored
@@ -459,10 +459,12 @@ def main():
 
         # Train 
         print('Train ...')
-        eval_train = train_vanilla_distributed(args, p, train_dataloader, model, criterion, optimizer, epoch)
+        # eval_train = train_vanilla_distributed(args, p, train_dataloader, model, criterion, optimizer, epoch)
+        eval_train = test_train_vanilla_distributed(args, p, train_dataloader, model, criterion, optimizer, epoch)
+        
 
         # Evaluate
-            # Check if need to perform eval first
+        # Check if need to perform eval first
         if 'eval_final_10_epochs_only' in p.keys() and p['eval_final_10_epochs_only']: # To speed up -> Avoid eval every epoch, and only test during final 10 epochs.
             if epoch + 1 > p['epochs']-10:
                 eval_bool = True

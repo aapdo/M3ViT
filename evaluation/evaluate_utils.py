@@ -291,20 +291,39 @@ def save_model_predictions(p, val_loader, model, args=None):
         inputs, meta = sample['image'].cuda(non_blocking=True), sample['meta']
         img_size = (inputs.size(2), inputs.size(3))
 
+        # if args is not None:
+        #     output={}
+        #     if args.one_by_one:
+        #         id=0
+        #         for single_task in p.TASKS.NAMES:
+        #             if args.task_one_hot:
+        #                 output.update(model(inputs,single_task=single_task, task_id = id))
+        #                 id=id+1
+        #             else:
+        #                 output.update(model(inputs,single_task=single_task))
+        #     else:
+        #         output = model(inputs)
+        # else:
+        #     output = model(inputs)
+
+        # Unpack model output (output, cv_losses)
         if args is not None:
             output={}
             if args.one_by_one:
                 id=0
                 for single_task in p.TASKS.NAMES:
                     if args.task_one_hot:
-                        output.update(model(inputs,single_task=single_task, task_id = id))
+                        task_output, _ = model(inputs,single_task=single_task, task_id = id)
+                        output.update(task_output)
                         id=id+1
                     else:
-                        output.update(model(inputs,single_task=single_task))
+                        task_output, _ = model(inputs,single_task=single_task)
+                        output.update(task_output)
             else:
-                output = model(inputs)
+                output, _ = model(inputs)
         else:
-            output = model(inputs)
+            output, _ = model(inputs)
+
         if ii%50==0:
             print('has saved samples',ii,len(val_loader))
         for task in p.TASKS.NAMES:

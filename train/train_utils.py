@@ -283,3 +283,99 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
     eval_results = performance_meter.get_score(verbose = True)
 
     return eval_results
+
+def test_train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer, epoch):
+    """ Vanilla training with fixed loss weights - test version with cv_losses from blocks """
+    losses = get_loss_meters(p)
+    performance_meter = PerformanceMeter(p)
+    progress = ProgressMeter(len(train_loader),
+        [v for v in losses.values()], prefix="Epoch: [{}]".format(epoch))
+
+    model.train()
+
+    for i, batch in enumerate(train_loader):
+        batch = handle_forward_hook_data(args, batch) # Added line
+        # Forward pass
+        images = batch['image'].cuda(args.local_rank, non_blocking=True)
+        targets = {task: batch[task].cuda(args.local_rank, non_blocking=True) for task in p.ALL_TASKS.NAMES}
+
+        if args.one_by_one:
+            optimizer.zero_grad()
+            id=0
+            for single_task in p.TASKS.NAMES:
+                if args.task_one_hot:
+                    output, cv_losses = model(images, single_task=single_task, task_id=id)
+                else:
+                    output, cv_losses = model(images, single_task=single_task)
+                id=id+1
+                loss_dict = criterion(output, targets, single_task)
+
+                for k, v in loss_dict.items():
+                    losses[k].update(v.item())
+                performance_meter.update({single_task: get_output(output[single_task], single_task)},
+                                 {single_task: targets[single_task]})
+
+                if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+                    # gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+
+                    # Add CV losses from blocks
+
+                    cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
+
+                    loss_dict['total'] += cv_loss_total
+                    losses['gating'].update(cv_loss_total)
+                # Backward
+                loss_dict['total'].backward()
+            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+                    model.allreduce_params()
+
+            optimizer.step()
+
+        else:
+            # if (args.regu_sem or args.sem_force or args.regu_subimage) and epoch<args.warmup_epochs:
+            #     output = model(images,sem=targets['semseg'])
+            # else:
+            output, cv_losses = model(images)
+
+
+            # Measure loss and performance
+            loss_dict = criterion(output, targets)
+
+            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+
+                # Add CV losses from blocks
+                cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
+
+                loss_dict['total'] += cv_loss_total
+                losses['gating'].update(cv_loss_total)
+                # if args.regu_sem and epoch<args.warmup_epochs:
+                #     semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
+                #     loss_dict['total'] += semregu_loss
+                # if args.regu_subimage and epoch<args.warmup_epochs:
+                #     regu_subimage_loss = collect_regu_subimage_loss(model, args.subimageregu_weight)
+                #     loss_dict['total']+=regu_subimage_loss
+            for k, v in loss_dict.items():
+                losses[k].update(v.item())
+            performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES},
+                                    {t: targets[t] for t in p.TASKS.NAMES})
+            # Backward
+            optimizer.zero_grad(set_to_none=True)
+            loss_dict['total'].backward()
+            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+                model.allreduce_params()
+            optimizer.step()
+
+
+        if i % 25 == 0:
+            progress.display(i)
+            # for name, param in model.named_parameters():
+            #     if 'gamma' in name:
+            #         print('gamma',param)
+            # if args.regu_sem and epoch<args.warmup_epochs:
+            #     print('semregu_loss',semregu_loss)
+            # if args.regu_subimage and epoch<args.warmup_epochs:
+            #     print('regu_subimage_loss',regu_subimage_loss)
+
+    eval_results = performance_meter.get_score(verbose = True)
+
+    return eval_results

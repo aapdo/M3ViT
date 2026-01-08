@@ -9,7 +9,7 @@ valBatch: 8
 nworkers: 4
 
 # Optimizer and scheduler
-epochs: 5
+epochs: 100
 optimizer: sgd
 optimizer_kwargs:
    lr: 0.002
@@ -96,5 +96,6 @@ loss_kwargs:
 
 # Eval only final 10 epochs for speed-up
 eval_final_10_epochs_only: True
+# eval_final_10_epochs_only: False
 
 
