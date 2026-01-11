@@ -6,9 +6,9 @@ from itertools import repeat
 # from torch._six import container_abcs
 import collections.abc
 import warnings
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from utils.helpers import load_pretrained,load_pretrained_pos_emb
-from models.custom_token_moe_layer import FMoETransformerMLP
+from models.token_custom_moe_layer import TokenFMoETransformerMLP
 # from .layers import DropPath, to_2tuple, trunc_normal_
 from timm.layers  import lecun_normal_
 # from ..builder import BACKBONES
@@ -16,12 +16,57 @@ import numpy as np
 from collections import Counter
 from models.gate_funs.noisy_gate import NoisyGate
 from models.gate_funs.noisy_gate_vmoe import NoisyGate_VMoE
+from models.gate_funs.token_noisy_gate_vmoe import TokenNoisyGate_VMoE
 from torch.utils.checkpoint import checkpoint
 
 from .gates import NoisyGate_VMoE as Custom_VMoE
 from models.moe import TaskMoE
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
+
+
+class Aggregation(nn.Module):
+    """Aggregates results from multiple tasks"""
+    def __init__(self, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, task_outputs, curr_shared_masks, aggregation_mask):
+        """
+        Args:
+            task_outputs: dict {task_id: [B, N, D]}
+            curr_shared_masks: list of [B, N] bool, len = T
+            aggregation_mask: [B, N] bool
+
+        Returns:
+            aggregated: [B, N, D] (valid only where aggregation_mask == True)
+        """
+        if not aggregation_mask.any():
+            return None
+
+        # [T, B, N, D]
+        outputs = torch.stack(
+            [task_outputs[t] for t in range(len(curr_shared_masks))],
+            dim=0
+        )
+
+        # [T, B, N]
+        shared_mask = torch.stack(curr_shared_masks, dim=0)
+
+        # [T, B, N] → only aggregate where needed
+        valid_mask = shared_mask & aggregation_mask.unsqueeze(0)
+
+        # [T, B, N, 1]
+        valid_mask_f = valid_mask.unsqueeze(-1).float()
+
+        # weighted sum
+        summed = (outputs * valid_mask_f).sum(dim=0)  # [B, N, D]
+
+        # count how many tasks contributed
+        count = valid_mask_f.sum(dim=0)  # [B, N, 1]
+
+        aggregated = summed / (count + self.eps)
+        return aggregated
 def _cfg(url='', **kwargs):
     return {
         'url': url,
@@ -227,8 +272,6 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
-
-
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
@@ -256,145 +299,29 @@ class PatchEmbed(nn.Module):
         x = self.proj(x)
         return x
 
-
-class HybridEmbed(nn.Module):
-    """ CNN Feature Map Embedding
-    Extract feature map from CNN, flatten, project to embedding dim.
-    """
-
-    def __init__(self, backbone, img_size=224, feature_size=None, in_chans=3, embed_dim=768):
-        super().__init__()
-        assert isinstance(backbone, nn.Module)
-        img_size = to_2tuple(img_size)
-        self.img_size = img_size
-        self.backbone = backbone
-        if feature_size is None:
-            with torch.no_grad():
-                # FIXME this is hacky, but most reliable way of determining the exact dim of the output feature
-                # map for all networks, the feature metadata has reliable channel and stride info, but using
-                # stride to calc feature dim requires info about padding of each stage that isn't captured.
-                training = backbone.training
-                if training:
-                    backbone.eval()
-                o = self.backbone(torch.zeros(
-                    1, in_chans, img_size[0], img_size[1]))[-1]
-                feature_size = o.shape[-2:]
-                feature_dim = o.shape[1]
-                backbone.train(training)
-        else:
-            feature_size = to_2tuple(feature_size)
-            feature_dim = self.backbone.feature_info.channels()[-1]
-        self.num_patches = feature_size[0] * feature_size[1]
-        self.proj = nn.Linear(feature_dim, embed_dim)
-
-    def forward(self, x):
-        x = self.backbone(x)[-1]
-        x = x.flatten(2).transpose(1, 2)
-        x = self.proj(x)
-        return x
-
-# class Block(nn.Module):
-
-#     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-#                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-#                  moe=False, moe_mlp_ratio=-1, moe_experts=64,
-#                  moe_top_k=2, moe_gate_dim=-1, world_size=1, gate_return_decoupled_activation=False,
-#                  moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False, 
-#                  regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1,
-#                  gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False):
-#         super().__init__()
-#         self.moe = moe
-#         self.norm1 = norm_layer(dim)
-#         self.attn = Attention(
-#             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-#         # NOTE: drop path for stochastic depth, we shall see if 
-#         self.drop_path = DropPath(
-#             drop_path) if drop_path > 0. else nn.Identity()
-#         self.norm2 = norm_layer(dim)
-#         mlp_hidden_dim = int(dim * mlp_ratio)
-#         self.gate_input_ahead = gate_input_ahead
-#         self.expert_prune = expert_prune
-#         if moe:
-#             activation = nn.Sequential(
-#                 act_layer(),
-#                 nn.Dropout(drop)
-#             )
-#             if moe_gate_dim < 0:
-#                 moe_gate_dim = dim
-#             if moe_mlp_ratio < 0:
-#                 moe_mlp_ratio = mlp_ratio
-#             moe_hidden_dim = int(dim * moe_mlp_ratio)
-
-#             if moe_gate_type == "noisy":
-#                 moe_gate_fun = NoisyGate
-#             elif moe_gate_type == "noisy_vmoe":
-#                 moe_gate_fun = Custom_VMoE
-#             else:
-#                 raise ValueError("unknow gate type of {}".format(moe_gate_type))
-
-#             # TaskMoE requires a list of gates (one per task)
-#             if num_tasks <= 0:
-#                 raise ValueError("num_tasks must be > 0 for TaskMoE")
-
-#             gates = [
-#                 moe_gate_fun(
-#                     d_model=dim,  # TaskMoE uses input_size as gate input
-#                     num_expert=16,
-#                     world_size=world_size,
-#                     top_k=4,
-#                     noise_std=vmoe_noisy_std if moe_gate_type == "noisy_vmoe" else 1.0
-#                 )
-#                 for _ in range(num_tasks)
-#             ]
-
-#             self.mlp = TaskMoE(
-#                 input_size=dim,
-#                 head_size=moe_hidden_dim,
-#                 num_experts=16,
-#                 k=4,
-#                 task_num=num_tasks,
-#                 noisy_gating=True,
-#                 activation=activation,
-#                 gates=gates
-#             )
-#             self.mlp_drop = nn.Dropout(drop)
-#         else:
-#             self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-    
-#     def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
-#         if self.gate_input_ahead: # False
-#             gate_inp = x
-#         x = x + self.drop_path(self.attn(self.norm1(x)))
-#         if not self.moe:
-#             x = x + self.drop_path(self.mlp(self.norm2(x)))
-#         else:
-#             # TaskMoE only needs x and task_id (task_bh parameter)
-#             if task_id is None:
-#                 raise ValueError("task_id must be provided for TaskMoE")
-#             x = x + self.drop_path(self.mlp_drop(self.mlp(self.norm2(x), task_bh=task_id)))
-#         return x
-
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 moe=False, moe_mlp_ratio=-1, moe_experts=64,
-                 moe_top_k=2, moe_gate_dim=-1, world_size=1, gate_return_decoupled_activation=False,
-                 moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False, 
-                 regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1,
-                 gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False):
+                 moe=False, moe_mlp_ratio=1., moe_experts=8,
+                 moe_top_k=4, moe_gate_dim=-1, world_size=2,
+                 moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False,
+                 num_experts_pertask = -1, num_tasks = -1,
+                 gate_input_ahead = False):
         super().__init__()
         self.moe = moe
+        self.moe_top_k = moe_top_k
+        self.tot_expert = moe_experts
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        # NOTE: drop path for stochastic depth, we shall see if 
+        # NOTE: drop path for stochastic depth, we shall see if
         self.drop_path = DropPath(
             drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.gate_input_ahead = gate_input_ahead
-        self.expert_prune = expert_prune
+
         if moe:
             activation = nn.Sequential(
                 act_layer(),
@@ -410,54 +337,170 @@ class Block(nn.Module):
                 moe_gate_fun = NoisyGate
             elif moe_gate_type == "noisy_vmoe":
                 moe_gate_fun = NoisyGate_VMoE
+            elif moe_gate_type == "token_noisy_vmoe":
+                moe_gate_fun = TokenNoisyGate_VMoE
             else:
                 raise ValueError("unknow gate type of {}".format(moe_gate_type))
 
-            self.mlp = FMoETransformerMLP(num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
+            self.mlp = TokenFMoETransformerMLP(num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
                                           world_size=world_size, top_k=moe_top_k, activation=activation, gate=moe_gate_fun,
-                                          gate_return_decoupled_activation=gate_return_decoupled_activation, vmoe_noisy_std=vmoe_noisy_std, 
-                                          gate_task_specific_dim=gate_task_specific_dim,multi_gate=multi_gate,
-                                          regu_experts_fromtask = regu_experts_fromtask, num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
-                                          regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,expert_prune=self.expert_prune)
+                                          vmoe_noisy_std=vmoe_noisy_std, gate_task_specific_dim=gate_task_specific_dim,multi_gate=multi_gate,
+                                          num_experts_pertask = num_experts_pertask, num_tasks = num_tasks
+                                        )
             self.mlp_drop = nn.Dropout(drop)
+
         else:
             self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-    
-    def _forward_with_attn_and_norm(self, x):
-        """Forward through norm1, attn, norm2 for checkpointing"""
+
+
+    @property
+    def get_mlp(self):
+        return self.mlp
+
+    @staticmethod
+    def _gates_to_load(gates):
+        """Compute the true load per expert, given the gates.
+        The load is the number of examples for which the corresponding gate is >0.
+        Args:
+            gates: a `Tensor` of shape [batch_size, n]
+        Returns:
+            a float32 `Tensor` of shape [n]
+        """
+        return (gates > 0).sum(0)
+
+    @staticmethod
+    def cv_squared(x, eps=1e-10):
+        """The squared coefficient of variation of a sample.
+        Useful as a loss to encourage a positive distribution to be more uniform.
+        Epsilons added for numerical stability.
+        Returns 0 for an empty Tensor.
+
+        Args:
+            x: a `Tensor`.
+        Returns:
+            a `Scalar`.
+        """
+        if x.numel() <= 1:
+            return x.new_tensor(0.0)
+        x = x.float()
+        return x.var(unbiased=False) / (x.mean() ** 2 + eps)
+
+    @staticmethod
+    def _prob_in_top_k(clean_values, noisy_values, noise_stddev, noisy_top_values, top_k):
+        """Helper function to NoisyTopKGating.
+        Computes the probability that value is in top k, given different random noise.
+
+        Args:
+            clean_values: a `Tensor` of shape [batch, n].
+            noisy_values: a `Tensor` of shape [batch, n].
+            noise_stddev: a `Tensor` of shape [batch, n], or None
+            noisy_top_values: a `Tensor` of shape [batch, m].
+            top_k: integer, the k in top-k
+        Returns:
+            a `Tensor` of shape [batch, n].
+        """
+        from torch.distributions.normal import Normal
+
+        batch = clean_values.size(0)
+        m = noisy_top_values.size(1)
+        top_values_flat = noisy_top_values.flatten()
+        threshold_positions_if_in = (
+            torch.arange(batch, device=clean_values.device) * m + top_k
+        )
+        threshold_if_in = torch.unsqueeze(
+            torch.gather(top_values_flat, 0, threshold_positions_if_in), 1
+        )
+        is_in = torch.gt(noisy_values, threshold_if_in)
+        threshold_positions_if_out = threshold_positions_if_in - 1
+        threshold_if_out = torch.unsqueeze(
+            torch.gather(top_values_flat, 0, threshold_positions_if_out), 1
+        )
+
+        normal = Normal(
+            torch.tensor(0.0, device=clean_values.device),
+            torch.tensor(1.0, device=clean_values.device),
+        )
+
+        prob_if_in = normal.cdf((clean_values - threshold_if_in) / (noise_stddev + 1e-9))
+        prob_if_out = normal.cdf((clean_values - threshold_if_out) / (noise_stddev + 1e-9))
+        prob = torch.where(is_in, prob_if_in, prob_if_out)
+        return prob
+
+    def _ckpt_moe(self, x, gate_inp, task_specific_feature, selector_output, task_id_tensor):
+        """Checkpointed MoE forward: attn + norm2 + mlp, returns (x, importance, load)"""
+        # attn + norm2
         x = x + self.drop_path(self.attn(self.norm1(x)))
         normed_x = self.norm2(x)
-        return x, normed_x
 
-    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
-        if self.gate_input_ahead: # False
-            gate_inp = x
+        task_id = int(task_id_tensor.item())
 
-        # Checkpoint norm1 + attention + norm2
-        if self.training:
-            x, normed_x = checkpoint(self._forward_with_attn_and_norm, x, use_reentrant=False)
+        moe_output, clean_logits, noisy_logits, noise_stddev, top_logits, gates = \
+            self.mlp(normed_x, gate_inp, task_id, task_specific_feature, selector_output)
+
+        x = x + self.drop_path(self.mlp_drop(moe_output))
+
+        # Compute summaries (importance, load) - no cv_loss here
+        importance = gates.sum(0)  # [E]
+
+        # Compute load - check noise_stddev properly
+        noise_ok = (noise_stddev is not None) and (noise_stddev.mean().item() > 1e-6)
+
+        if (self.moe_top_k < self.tot_expert) and noise_ok:
+            load = self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits, self.moe_top_k).sum(0)
         else:
-            x = x + self.drop_path(self.attn(self.norm1(x)))
-            normed_x = self.norm2(x)
+            load = self._gates_to_load(gates)
 
-        # MoE mlp is not checkpointed
-        if not self.moe:
-            x = x + self.drop_path(self.mlp(normed_x))
-        else:
-            x = x + self.drop_path(self.mlp_drop(self.mlp(normed_x, gate_inp, task_id, task_specific_feature, sem)))
+        return x, importance, load
+
+    def _ckpt_non_moe(self, x):
+        """Checkpointed non-MoE forward: attn + norm2 + mlp"""
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        normed_x = self.norm2(x)
+        x = x + self.drop_path(self.mlp(normed_x))
         return x
 
+    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, selector_output=None):
+        if self.gate_input_ahead:
+            gate_inp = x
 
-class VisionTransformerTokenMoE(nn.Module):
+        if not self.moe:
+            # non-moe path: fully checkpointed
+            if self.training:
+                x = checkpoint(self._ckpt_non_moe, x, use_reentrant=False)
+            else:
+                x = self._ckpt_non_moe(x)
+            return x, None, None
+
+        # MoE path
+        task_id_tensor = torch.tensor(
+            0 if task_id is None else int(task_id),
+            device=x.device,
+            dtype=torch.int64
+        )
+
+        if self.training:
+            x, importance, load = checkpoint(
+                self._ckpt_moe,
+                x, gate_inp, task_specific_feature, selector_output, task_id_tensor,
+                use_reentrant=False
+            )
+        else:
+            x, importance, load = self._ckpt_moe(
+                x, gate_inp, task_specific_feature, selector_output, task_id_tensor
+            )
+
+        return x, importance, load
+
+class TokenVisionTransformerMoE(nn.Module):
     def __init__(self, model_name='vit_large_patch16_384', img_size=384, patch_size=16, in_chans=3, embed_dim=1024, depth=24,
                     num_heads=16, num_classes=19, mlp_ratio=4., qkv_bias=True, qk_scale=None,  representation_size=None, distilled=False, 
                     drop_rate=0.1, attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=partial(nn.LayerNorm, eps=1e-6), norm_cfg=None,
                     pos_embed_interp=False, random_init=False, align_corners=False,
-                    act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=64, moe_top_k=2, world_size=1, gate_dim=-1,
-                    gate_return_decoupled_activation=False, moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1,multi_gate=False,
-                    regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False, regu_sem=False, sem_force=False, regu_subimage=False, 
-                    expert_prune=False, **kwargs):
-        super(VisionTransformerTokenMoE, self).__init__(**kwargs)
+                    act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=8, moe_top_k=4, world_size=2, gate_dim=-1,
+                    moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=-1,multi_gate=False,
+                    num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False, 
+                    **kwargs):
+        super(TokenVisionTransformerMoE, self).__init__(**kwargs)
         # print(hybrid_backbone is None)
         self.model_name = model_name
         self.img_size = img_size
@@ -491,19 +534,10 @@ class VisionTransformerTokenMoE(nn.Module):
         self.norm_layer = norm_layer
         self.moe_experts = moe_experts
         self.moe_top_k = moe_top_k
-        self.gate_return_decoupled_activation = gate_return_decoupled_activation
         self.multi_gate = multi_gate
-        self.regu_sem = regu_sem
-        self.sem_force = sem_force
-        # print(self.hybrid_backbone is None)
-        self.expert_prune = expert_prune
-        print('set expert prune as ',self.expert_prune)
-        if self.hybrid_backbone is not None:
-            self.patch_embed = HybridEmbed(
-                self.hybrid_backbone, img_size=self.img_size, in_chans=self.in_chans, embed_dim=self.embed_dim)
-        else:
-            self.patch_embed = PatchEmbed(
-                img_size=self.img_size, patch_size=self.patch_size, in_chans=self.in_chans, embed_dim=self.embed_dim)
+
+        self.patch_embed = PatchEmbed(
+            img_size=self.img_size, patch_size=self.patch_size, in_chans=self.in_chans, embed_dim=self.embed_dim)
         self.num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
@@ -515,6 +549,7 @@ class VisionTransformerTokenMoE(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate,
                                                 self.depth)]  # stochastic depth decay rule
         blocks = []
+        # Todo: param에 num_task 추가.
         self.num_tasks = gate_dim-embed_dim
         self.gate_task_specific_dim = gate_task_specific_dim
         self.gate_input_ahead = gate_input_ahead
@@ -531,12 +566,15 @@ class VisionTransformerTokenMoE(nn.Module):
                 blocks.append(Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                               moe=True, moe_mlp_ratio=moe_mlp_ratio, moe_experts=moe_experts, moe_top_k=moe_top_k, moe_gate_dim=gate_dim, world_size=world_size,
-                              gate_return_decoupled_activation=self.gate_return_decoupled_activation,
                               moe_gate_type=moe_gate_type, vmoe_noisy_std=vmoe_noisy_std, 
                               gate_task_specific_dim=self.gate_task_specific_dim,multi_gate=self.multi_gate,
-                              regu_experts_fromtask = regu_experts_fromtask, num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
-                              gate_input_ahead = self.gate_input_ahead,regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,expert_prune=self.expert_prune))
+                              num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
+                              gate_input_ahead = self.gate_input_ahead))
         self.blocks = nn.Sequential(*blocks)
+
+        # Initialize aggregation module
+        self.aggregation = Aggregation()
+
         # NOTE as per official impl, we could have a pre-logits representation dense layer + tanh here
         # self.repr = nn.Linear(embed_dim, representation_size)
         # self.repr_act = nn.Tanh()
@@ -569,6 +607,14 @@ class VisionTransformerTokenMoE(nn.Module):
 
         self.init_weights()
         self.idx = 0
+
+        # Get wandb logger instance (will be None if not initialized)
+        try:
+            from utils.wandb_logger import get_wandb_logger
+            self.wandb_logger = get_wandb_logger
+        except:
+            self.wandb_logger = None
+
     def init_weights(self, pretrained=None):
         for n, m in self.named_modules():
             if isinstance(m, nn.Linear):
@@ -597,6 +643,189 @@ class VisionTransformerTokenMoE(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
 
+    def forward(self, x, gate_inp=None, sem=None):
+        B = x.shape[0]
+        x = self.patch_embed(x)
+        x = x.flatten(2).transpose(1, 2)
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        # x.shape => [Batch, Number of Token, Dimension]
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        task_specific_feature = None
+
+        # TODO: support task conditioned router embedding
+        # if (task_id is not None) and (self.gate_task_represent is not None):
+        #     task_specific = torch.zeros(self.num_tasks,device=x.device)
+        #     task_specific[task_id]=1.0
+        #     task_specific_feature = self.gate_task_represent(task_specific)
+
+        # Initialize dict to store outputs for each task
+        outs = {task: x for task in range(self.num_tasks)}
+        prev_router_outputs = []
+        is_first_moe = True
+
+        # Initialize total cv_loss
+        total_cv_loss = x.new_tensor(0.0)
+
+        # Initialize statistics counters
+        stats = {
+            'total_tokens': 0,
+            'reusable_tokens': 0,
+            'aggregated_tokens': 0,
+            'shared_gate_tokens': 0,
+            'moe_blocks': 0
+        }
+
+        for i, blk in enumerate(self.blocks):
+            if blk.moe:
+                stats['moe_blocks'] += 1
+
+                # Compute current router outputs for all tasks
+                current_router_outputs = []
+                for task in range(self.num_tasks):
+                    current_router_outputs.append(blk.mlp.router_selector(outs[task]))
+
+                if is_first_moe:
+                    # First MoE block: force all tokens to use task-specific gate (no shared_gate)
+                    # Set selector_output to 0 to force task-specific gate usage
+                    for task in range(self.num_tasks):
+                        forced_selector = torch.zeros_like(current_router_outputs[task])
+                        outs[task], imp, load = blk(
+                            outs[task],
+                            gate_inp=gate_inp,
+                            task_id=task,
+                            task_specific_feature=task_specific_feature,
+                            selector_output=forced_selector
+                        )
+                        # Accumulate cv_loss
+                        if (imp is not None) and (load is not None):
+                            total_cv_loss = total_cv_loss + blk.cv_squared(imp) + blk.cv_squared(load)
+                    is_first_moe = False
+                else:
+                    # Not first MoE block: analyze aggregation opportunities
+                    # For each token position [B, N], classify into three categories:
+                    # 1. prev & curr both True (>=2 tasks): reusable - compute once and copy
+                    # 2. any task has curr False: not reusable - each task computes independently
+                    # 3. prev False, curr True (>=2 tasks): compute independently, then aggregate results
+
+                    curr_shared_masks = []  # [T, B, N]: curr > 0.5
+                    prev_shared_masks = []  # [T, B, N]: prev > 0.5
+                    reusable_masks = []     # [T, B, N]: prev & curr both True
+
+                    for task in range(self.num_tasks):
+                        curr_mask = (current_router_outputs[task] > 0.5)  # [B, N]
+                        prev_mask = (prev_router_outputs[task] > 0.5)     # [B, N]
+                        reusable_mask = curr_mask & prev_mask              # [B, N]
+
+                        curr_shared_masks.append(curr_mask)
+                        prev_shared_masks.append(prev_mask)
+                        reusable_masks.append(reusable_mask)
+
+                    # Stack masks: [num_tasks, B, N]
+                    curr_shared_stacked = torch.stack(curr_shared_masks, dim=0)      # [T, B, N]
+                    reusable_stacked = torch.stack(reusable_masks, dim=0)            # [T, B, N]
+
+                    # Count how many tasks have curr_shared for each position
+                    curr_shared_count = curr_shared_stacked.sum(dim=0)  # [B, N]
+
+                    # Count how many tasks are reusable (prev & curr both True) for each position
+                    reusable_count = reusable_stacked.sum(dim=0)  # [B, N]
+
+                    # Collect statistics
+                    total_positions = B * (x.shape[1])  # B * N (number of tokens)
+                    stats['total_tokens'] += total_positions
+
+                    # Shared gate usage: positions where at least one task uses shared_gate
+                    shared_positions = (curr_shared_count > 0).sum().item()
+                    stats['shared_gate_tokens'] += shared_positions
+
+                    # Reusable positions: where at least 2 tasks have prev & curr both True
+                    reusable_positions = (reusable_count >= 2).sum().item()
+                    stats['reusable_tokens'] += reusable_positions
+
+                    # MoE block forward for each task
+                    task_outputs = {}
+                    for task in range(self.num_tasks):
+                        outs[task], imp, load = blk(
+                            outs[task],
+                            gate_inp=gate_inp,
+                            task_id=task,
+                            task_specific_feature=task_specific_feature,
+                            selector_output=current_router_outputs[task]
+                        )
+                        task_outputs[task] = outs[task]
+
+                        # Accumulate cv_loss
+                        if (imp is not None) and (load is not None):
+                            total_cv_loss = total_cv_loss + blk.cv_squared(imp) + blk.cv_squared(load)
+
+                    # Reuse results for skipped positions (prev & curr both True)
+                    # Note: Reuse logic is removed to avoid checkpoint issues
+
+                    # Aggregate results for positions where prev: False, curr: True (>=2 tasks)
+                    # These positions need aggregation_function to combine results from multiple tasks
+                    aggregation_needed_mask = (reusable_count < curr_shared_count) & (curr_shared_count >= 2)
+
+                    # Collect aggregation statistics
+                    aggregated_positions = aggregation_needed_mask.sum().item()
+                    stats['aggregated_tokens'] += aggregated_positions
+
+                    if aggregation_needed_mask.any():
+                        # Apply aggregation for positions where multiple tasks use shared_gate in curr
+                        # but not all used it in prev
+                        aggregated = self.aggregation(
+                            task_outputs,
+                            curr_shared_masks,
+                            aggregation_needed_mask
+                        )
+
+                        if aggregated is not None:
+                            # Update all tasks' outputs at aggregation positions using torch.where
+                            for task in range(self.num_tasks):
+                                update_mask = aggregation_needed_mask & curr_shared_masks[task]
+                                if update_mask.any():
+                                    m = update_mask.unsqueeze(-1)
+                                    outs[task] = torch.where(m, aggregated, outs[task])
+
+                # Update prev_router_outputs for next iteration
+                prev_router_outputs = [curr.clone() for curr in current_router_outputs]
+
+            else:
+                # Non-MoE block: each task processes independently
+                for task in range(self.num_tasks):
+                    outs[task], _, _ = blk(outs[task])
+
+        # Calculate statistics ratios
+        if stats['total_tokens'] > 0:
+            stats['reuse_ratio'] = stats['reusable_tokens'] / stats['total_tokens']
+            stats['aggregation_ratio'] = stats['aggregated_tokens'] / stats['total_tokens']
+            stats['shared_gate_ratio'] = stats['shared_gate_tokens'] / stats['total_tokens']
+        else:
+            stats['reuse_ratio'] = 0.0
+            stats['aggregation_ratio'] = 0.0
+            stats['shared_gate_ratio'] = 0.0
+
+        # Log MoE stats to wandb if available (only during training)
+        if self.training and stats['total_tokens'] > 0 and self.wandb_logger is not None:
+            logger = self.wandb_logger()
+            if logger is not None:
+                logger.log_moe_stats(stats)
+
+        return outs, total_cv_loss
+
+    # def to_2D(self, x):
+    #     n, hw, c = x.shape
+    #     h = w = int(math.sqrt(hw))
+    #     x = x.transpose(1, 2).reshape(n, c, h, w)
+    #     return x
+
+    # def to_1D(self, x):
+    #     n, c, h, w = x.shape
+    #     x = x.reshape(n, c, -1).transpose(1, 2)
+    #     return x
+
     def _conv_filter(self, state_dict, patch_size=16):
         """ convert patch embedding weight from manual patchify + linear proj to conv"""
         out_dict = {}
@@ -606,68 +835,8 @@ class VisionTransformerTokenMoE(nn.Module):
             out_dict[k] = v
         return out_dict
 
-    def to_2D(self, x):
-        n, hw, c = x.shape
-        h = w = int(math.sqrt(hw))
-        x = x.transpose(1, 2).reshape(n, c, h, w)
-        return x
 
-    def to_1D(self, x):
-        n, c, h, w = x.shape
-        x = x.reshape(n, c, -1).transpose(1, 2)
-        return x
-
-    def get_groundtruth_sem(self, sem):
-        batch = sem.shape[0]
-        hint = np.ones((batch,1,int(sem.shape[2]/self.patch_size),int(sem.shape[3]/self.patch_size)))*255
-        idx = 0
-        for k in range(batch):
-            for i in range(int(sem.shape[2]/self.patch_size)):
-                for j in range(int(sem.shape[3]/self.patch_size)):
-                    patch = sem[k][:,self.patch_size*i:self.patch_size*(i+1),self.patch_size*j:self.patch_size*(j+1)].cpu().numpy().flatten()
-                    index , num=Counter(patch).most_common(1)[0]
-                    if num>0.4*(self.patch_size*self.patch_size):
-                        hint[k,:,i,j]=index
-                        if index != 255:
-                            idx = idx+1
-        filename = 'gt_patch_{}.npy'.format(self.idx)
-        self.idx=self.idx+1
-        np.save(filename, hint)
-        return torch.tensor(hint, device=sem.device) 
-
-    def forward_features(self, x, gate_inp, task_id,sem):
-        B = x.shape[0]
-        x = self.patch_embed(x)
-        x = x.flatten(2).transpose(1, 2)
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
-        x = self.pos_drop(x)
-
-        task_specific_feature = None
-        if (task_id is not None) and (self.gate_task_represent is not None):
-            task_specific = torch.zeros(self.num_tasks,device=x.device)
-            task_specific[task_id]=1.0
-            task_specific_feature = self.gate_task_represent(task_specific)
-        outs = []
-        
-        for i, blk in enumerate(self.blocks):
-            if blk.moe:
-                x=blk(x, gate_inp, task_id, task_specific_feature,sem=sem)
-            else:
-                x = blk(x)
-            if i in self.out_indices:
-                outs.append(x)
-        return tuple(outs)
-
-    def forward(self, x, gate_inp=None, task_id=None,sem=None):
-        if sem is not None and (self.regu_sem or self.sem_force):
-            sem = self.get_groundtruth_sem(sem)
-        out = self.forward_features(x, gate_inp, task_id = task_id,sem=sem)
-        return out
-
-
-def _init_vit_weights(m, n: str = '', head_bias: float = 0., jax_impl: bool = False):
+def _init_vit_weights(m, n: str = '', head_bias: float = 0., jax_impl: bool = False):#
     """ ViT weight initialization
     * When called without n, head_bias, jax_impl args it will behave exactly the same
       as my original init for compatibility with prev hparam / downstream use cases (ie DeiT).

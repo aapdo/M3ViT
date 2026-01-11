@@ -69,104 +69,11 @@ class NoisyGate_VMoE(BaseGate):
         if self.return_decoupled_activation:
             torch.nn.init.kaiming_uniform_(self.w_gate_aux, a=math.sqrt(5))
 
-    def _gates_to_load(self, gates):
-        """Compute the true load per expert, given the gates.
-        The load is the number of examples for which the corresponding gate is >0.
-        Args:
-        gates: a `Tensor` of shape [batch_size, n]
-        Returns:
-        a float32 `Tensor` of shape [n]
-        """
-        return (gates > 0).sum(0)
-
-    def _prob_in_top_k(
-        self, clean_values, noisy_values, noise_stddev, noisy_top_values
-    ):
-        """Helper function to NoisyTopKGating.
-        Computes the probability that value is in top k, given different random noise.
-        This gives us a way of backpropagating from a loss that balances the number
-        of times each expert is in the top k experts per example.
-        In the case of no noise, pass in None for noise_stddev, and the result will
-        not be differentiable.
-        Args:
-        clean_values: a `Tensor` of shape [batch, n].
-        noisy_values: a `Tensor` of shape [batch, n].  Equal to clean values plus
-          normally distributed noise with standard deviation noise_stddev.
-        noise_stddev: a `Tensor` of shape [batch, n], or None
-        noisy_top_values: a `Tensor` of shape [batch, m].
-           "values" Output of tf.top_k(noisy_top_values, m).  m >= k+1
-        Returns:
-        a `Tensor` of shape [batch, n].
-        """
-
-        batch = clean_values.size(0)
-        m = noisy_top_values.size(1)
-        top_values_flat = noisy_top_values.flatten()
-        threshold_positions_if_in = (
-            torch.arange(batch, device=clean_values.device) * m + self.top_k
-        )
-        threshold_if_in = torch.unsqueeze(
-            torch.gather(top_values_flat, 0, threshold_positions_if_in), 1
-        )
-        is_in = torch.gt(noisy_values, threshold_if_in)
-        threshold_positions_if_out = threshold_positions_if_in - 1
-        threshold_if_out = torch.unsqueeze(
-            torch.gather(top_values_flat, 0, threshold_positions_if_out), 1
-        )
-        # is each value currently in the top k.
-        normal = Normal(
-            torch.tensor([0.0], device=clean_values.device),
-            torch.tensor([1.0], device=clean_values.device),
-        )
-
-        prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)
-        prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
-        prob = torch.where(is_in, prob_if_in, prob_if_out)
-        return prob
-
-    def cv_squared(self, x):
-        """The squared coefficient of variation of a sample.
-        Useful as a loss to encourage a positive distribution to be more uniform.
-        Epsilons added for numerical stability.
-        Returns 0 for an empty Tensor.
-        Args:
-        x: a `Tensor`.
-        Returns:
-        a `Scalar`.
-        """
-        eps = 1e-10
-        # if only num_expert = 1
-        if x.shape[0] == 1:
-            return torch.Tensor([0])
-        return x.float().var() / (x.float().mean() ** 2 + eps)
-
-    def set_loss(self, loss):
-        if self.loss is None:
-            self.loss = loss
-        else:
-            self.loss += loss
     def get_semregu_loss(self):
         return self.semregu_loss
 
     def get_regu_subimage_loss(self):
         return self.regu_subimage_loss
-
-
-    # def get_groundtruth_sem(self, sem):
-    #     batch = sem.shape[0]
-    #     hint = np.ones(batch,1,int(sem.shape[2]/self.patch_size),int(sem.shape[3]/self.patch_size))*255
-    #     idx = 0
-    #     for k in range(batch):
-    #         for i in range(int(sem.shape[2]/self.patch_size)):
-    #             for j in range(int(sem.shape[3]/self.patch_size)):
-    #                 patch = sem[k][:,self.patch_size*i:self.patch_size*(i+1),self.patch_size*j:self.patch_size*(j+1)].cpu().numpy().flatten()
-    #                 index , num=Counter(patch).most_common(1)[0]
-    #                 if num>0.4*(self.patch_size*self.patch_size):
-    #                     hint[k,:,i,j]=index
-    #                     if index != 255:
-    #                         idx = idx+1
-    #     print(idx/(batch*int(sem.shape[2]/self.patch_size)*int(sem.shape[3]/self.patch_size)),'percent token will be used')        
-    #     return torch.tensor(hint, device=sem.device) 
      
     def forward(self, inp, task_id=None,sem=None):
         shape_input = list(inp.shape)
@@ -266,29 +173,7 @@ class NoisyGate_VMoE(BaseGate):
         zeros = torch.zeros_like(logits, requires_grad=True)
         gates = zeros.scatter(1, top_k_indices, top_k_logits)
 
-        if self.training:
-            if self.top_k < self.tot_expert and (not self.no_noise) and abs(noise_stddev) > 1e-6:
-                # print("calculate load loss")
-                load = (
-                    self._prob_in_top_k(
-                        clean_logits, noisy_logits, noise_stddev, top_logits
-                    )
-                ).sum(0)
-            else:
-                load = self._gates_to_load(gates)
-
-            importance = gates.sum(0)
-            # loss = self.cv_squared(importance) + self.cv_squared(load)
-
-            cv_imp = self.cv_squared(importance)
-            cv_load = self.cv_squared(load)
-            loss = cv_imp + cv_load
-            # print(f"NoisyGate_VMoE: cv_imp={cv_imp:.4f}, cv_load={cv_load:.4f}, importance={importance.tolist()}, load={load.tolist()}")
-        else:
-            loss = 0
-
-        self.set_loss(loss)
-        self.activation = logits.reshape(other_dim + [-1,]).contiguous()
+        # self.activation = logits.reshape(other_dim + [-1,]).contiguous()
 
         # print("top_k_indices are {}".format(top_k_indices))
         if self.return_decoupled_activation:
@@ -298,10 +183,15 @@ class NoisyGate_VMoE(BaseGate):
         top_k_indices = top_k_indices.reshape(other_dim + [self.top_k]).contiguous()
         top_k_gates = top_k_gates.reshape(other_dim + [self.top_k]).contiguous()
         # print('top_k_indices',top_k_indices.shape,top_k_gates.shape)
+
         return (
-            top_k_indices,
-            top_k_gates,
-        )
+            (top_k_indices, top_k_gates),
+            clean_logits,
+            noisy_logits,
+            noise_stddev,
+            top_logits,
+            gates
+        ) 
 
     def get_activation(self, clear=True):
         activation = self.activation

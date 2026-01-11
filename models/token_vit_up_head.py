@@ -70,14 +70,14 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
 
 
 # @HEADS.register_module()
-class VisionTransformerUpHead(BaseDecodeHead):
+class TokenVisionTransformerUpHead(BaseDecodeHead):
     """ Vision Transformer with support for patch or hybrid CNN input stage
     """
 
     def __init__(self, img_size=768, patch_size = 16, embed_dim=1024,
                  norm_layer=partial(nn.LayerNorm, eps=1e-6), norm_cfg=None,
                  num_conv=1, upsampling_method='bilinear', num_upsampe_layer=1, conv3x3_conv1x1=True,p=None, **kwargs):
-        super(VisionTransformerUpHead, self).__init__(**kwargs)
+        super(TokenVisionTransformerUpHead, self).__init__(**kwargs)
         self.img_size = img_size
         self.norm_cfg = norm_cfg
         self.num_conv = num_conv
@@ -97,12 +97,7 @@ class VisionTransformerUpHead(BaseDecodeHead):
         else:
             self.multi_level = False
         print('will consider multi level output in head',self.multi_level)
-        if 'model_kwargs' in p:
-            self.tam = p['model_kwargs']['tam']
-            
-        else:
-            self.tam = False
-        print('will consider tam in heads',self.tam)
+        print('will consider tam in heads', False)
         if self.num_conv == 2:
             if self.conv3x3_conv1x1:
                 self.conv_0 = nn.Conv2d(
@@ -147,7 +142,7 @@ class VisionTransformerUpHead(BaseDecodeHead):
                 nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x):
-        x = self._transform_inputs(x)
+        # x = self._transform_inputs(x)
         # print('before head',x.shape)
         if x.dim() == 3:
             if x.shape[1] % 48 != 0:
@@ -191,34 +186,36 @@ class VisionTransformerUpHead(BaseDecodeHead):
                     x = self.conv_1(x)
                     x = self.syncbn_fc_1(x)
                     x = F.relu(x, inplace=True)
-                    if self.tam and self.training:
-                        tam_feature0 = x
+
                     x = F.interpolate(
                         x, size=(x.shape[-2]*2,x.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
+
                     if self.multi_level:
                         out['level2'] = self.output_level_1(x)
+
                     x = self.conv_2(x)
                     x = self.syncbn_fc_2(x)
                     x = F.relu(x, inplace=True)
-                    if self.tam and self.training:
-                        tam_feature1 = x
+
                     x = F.interpolate(
                         x, size=(x.shape[-2]*2,x.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
+
                     if self.multi_level:
                         out['level3'] = self.output_level_2(x)
+
                     x = self.conv_3(x)
                     x = self.syncbn_fc_3(x)
                     x = F.relu(x, inplace=True)
-                    if self.tam and self.training:
-                        tam_feature2 = x
+
                     x = self.conv_4(x)
                     x = F.interpolate(
                         x, size=(x.shape[-2]*2,x.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
+
                     if self.multi_level:
                         out['final'] = x
+
         if self.multi_level:
             return out
         else:
-            if self.tam and self.training:
-                return x, tam_feature0,tam_feature1,tam_feature2
             return x
+

@@ -172,17 +172,26 @@ class MultiTaskModel(nn.Module):
             assert self.tasks_id[single_task]==task_id
         # print('input shape',x.shape)
         out_size = x.size()[2:]
+        cv_losses = []  # Initialize cv_losses
+
         if not self.multi_gate:
             if task_id is None:
                 if sem is None:
-                    shared_representation = self.backbone(x)
+                    backbone_out = self.backbone(x)
                 else:
-                    shared_representation = self.backbone(x, sem=sem)
+                    backbone_out = self.backbone(x, sem=sem)
             else:
                 if sem is None:
-                    shared_representation = self.backbone(x, task_id=task_id)
+                    backbone_out = self.backbone(x, task_id=task_id)
                 else:
-                    shared_representation = self.backbone(x, task_id=task_id, sem=sem)
+                    backbone_out = self.backbone(x, task_id=task_id, sem=sem)
+
+            # Unpack backbone output
+            if isinstance(backbone_out, tuple):
+                shared_representation, cv_losses = backbone_out
+            else:
+                shared_representation = backbone_out
+                cv_losses = []
             # print('shared_representation',shared_representation.shape,out_size)
             if self.tam and self.training:
                 if self.tam_level0:
@@ -193,7 +202,7 @@ class MultiTaskModel(nn.Module):
                     deepfeature2 = {}
             out = {}
             if single_task is not None:
-                return {single_task: F.interpolate(self.decoders[single_task](shared_representation), out_size, mode='bilinear')}
+                return {single_task: F.interpolate(self.decoders[single_task](shared_representation), out_size, mode='bilinear')}, cv_losses
             
             for task in self.tasks:
                 if self.tam and self.training:
@@ -221,9 +230,10 @@ class MultiTaskModel(nn.Module):
                     x = self.tam_model2(deepfeature2)
                     for task in self.tasks:
                         out['tam_level2_%s' %(task)] = F.interpolate(x[task], out_size, mode='bilinear', align_corners=False)
-            return out
+            return out, cv_losses
         else:
             out = {}
+            total_cv_loss = x.new_tensor(0.0)
             if self.tam:
                 if self.tam_level0:
                     deepfeature0 = {}
@@ -231,9 +241,16 @@ class MultiTaskModel(nn.Module):
                     deepfeature1 = {}
                 if self.tam_level2:
                     deepfeature2 = {}
-            
+
             for task in self.tasks:
-                pertask_representation = self.backbone(x,task_id=self.tasks_id[task])
+                backbone_out = self.backbone(x, task_id=self.tasks_id[task])
+
+                # Unpack backbone output
+                if isinstance(backbone_out, tuple):
+                    pertask_representation, task_cv_loss = backbone_out
+                    total_cv_loss = task_cv_loss if total_cv_loss is None else (total_cv_loss + task_cv_loss)
+                else:
+                    pertask_representation = backbone_out
                 if self.tam and self.training:
                     out[task], feature0, feature1, feature2 = self.decoders[task](pertask_representation)
                     if self.tam_level0:
@@ -246,7 +263,7 @@ class MultiTaskModel(nn.Module):
                     out[task] = F.interpolate(out[task], out_size, mode='bilinear')
                 else:
                     out[task] = F.interpolate(self.decoders[task](pertask_representation), out_size, mode='bilinear')
-                
+
             if self.tam and self.training:
                 if self.tam_level0:
                     x = self.tam_model0(deepfeature0)
@@ -260,9 +277,77 @@ class MultiTaskModel(nn.Module):
                     x = self.tam_model2(deepfeature2)
                     for task in self.tasks:
                         out['tam_level2_%s' %(task)] = F.interpolate(x[task], out_size, mode='bilinear', align_corners=False)
+
+            return out, total_cv_loss
+
+class TokenMultiTaskModel(nn.Module):
+    """ Multi-task baseline model with shared encoder + task-specific decoders """
+    def __init__(self, backbone: nn.Module, decoders: nn.ModuleDict, tasks: list,p=None):
+        super(TokenMultiTaskModel, self).__init__()
+        assert(set(decoders.keys()) == set(tasks))
+        self.backbone = backbone
+        self.decoders = decoders
+        self.tasks = tasks
+        self.tasks_id ={}
+        id=0
+        for task in self.tasks:
+            self.tasks_id[task]=id
+            id=id+1
+
+        print('will consider tam in model', False)
+        if 'multi_level' in p:
+            self.multi_level = p['multi_level']
+        else:
+            self.multi_level = False
+        print('will consider multi level output in model',self.multi_level)
+
+        if 'multi_gate' in p:
+            self.multi_gate = p['multi_gate']
+        else:
+            self.multi_gate = False
+        print('will consider multi gate output in model',self.multi_gate)
+        
+    def forward(self, x, single_task=None, task_id = None, sem=None):
+        if task_id is not None:
+            assert self.tasks_id[single_task]==task_id
+        # print('input shape',x.shape)
+        out_size = x.size()[2:]
+        if self.multi_gate:
+            # 모든 태스크 한번에 다 실행하고, 블럭 단위로도 모든 태스크 처리하고 다음 블럭. 다음 블럭에서 모든 태스크 처리하고 그 다음. 이렇게 넘어가야함.
+            backbone_out = self.backbone(x)
+
+            # Unpack backbone output (task_outputs_dict, total_cv_loss)
+            if isinstance(backbone_out, tuple):
+                task_outputs_dict, total_cv_loss = backbone_out
+            else:
+                task_outputs_dict = backbone_out
+                total_cv_loss = x.new_tensor(0.0)
+
+            out = {}
+            for task in self.tasks:
+                out[task] = F.interpolate(self.decoders[task](task_outputs_dict[self.tasks_id[task]]), out_size, mode='bilinear')
+
+            return out, total_cv_loss
+        else:
+            if task_id is None:
+                if sem is None:
+                    shared_representation = self.backbone(x)
+                else:
+                    shared_representation = self.backbone(x, sem=sem)
+            else:
+                if sem is None:
+                    shared_representation = self.backbone(x, task_id=task_id)
+                else:
+                    shared_representation = self.backbone(x, task_id=task_id, sem=sem)
+            # print('shared_representation',shared_representation.shape,out_size)
+            out = {}
+            if single_task is not None:
+                return {single_task: F.interpolate(self.decoders[single_task](shared_representation), out_size, mode='bilinear')}
+
+            for task in self.tasks:
+                out[task] = F.interpolate(self.decoders[task](shared_representation), out_size, mode='bilinear')
+
             return out
-
-
                 
 
 

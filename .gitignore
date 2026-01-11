@@ -135,5 +135,6 @@ Thumbs.db
 
 # Custom
 script.txt
+run.txt
 output_dir/
-env_setup/
+wandb/

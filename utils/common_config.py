@@ -166,7 +166,7 @@ def get_backbone(p, args=None):
         linear_keyword = 'head'
     
     elif p['backbone'] == 'VisionTransformer_moe':
-        from models.test_vision_transformer_moe import VisionTransformerMoE
+        from models.vision_transformer_moe import VisionTransformerMoE
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         bn_args = p['backbone_kwargs']
         if args.moe_data_distributed:
@@ -200,6 +200,43 @@ def get_backbone(p, args=None):
                                         gate_input_ahead = args.gate_input_ahead,regu_sem=args.regu_sem,sem_force=args.sem_force,regu_subimage=args.regu_subimage,expert_prune = args.expert_prune)
         linear_keyword = 'head'
         backbone_channels = 2048
+
+    elif p['backbone'] == 'Token_VisionTransformer_moe':
+        from models.token_vision_transformer_moe import TokenVisionTransformerMoE
+        norm_cfg = dict(type='SyncBN', requires_grad=True)
+        bn_args = p['backbone_kwargs']
+        if args.moe_data_distributed:
+            moe_world_size = 1
+        else:
+            moe_world_size = torch.distributed.get_world_size()
+            if args.moe_experts % moe_world_size != 0:
+                print("experts number of {} is not divisible by world size of {}".format(args.moe_experts, moe_world_size))
+            args.moe_experts = args.moe_experts // moe_world_size
+        if args.moe_use_gate:
+            gate_model = vits_gate.__dict__[args.moe_gate_arch](num_classes=0)
+            backbone = TokenVisionTransformerMoE(model_name=bn_args['model_name'],\
+                img_size=bn_args['img_size'], patch_size=bn_args['patch_size'], in_chans=bn_args['in_chans'], embed_dim=bn_args['embed_dim'], depth=bn_args['depth'],\
+                    num_heads=bn_args['num_heads'], num_classes=bn_args['num_classes'], mlp_ratio=bn_args['mlp_ratio'], qkv_bias=bn_args['qkv_bias'], qk_scale=None, representation_size=None, distilled=bn_args['distilled'],\
+                        drop_rate=bn_args['drop_rate'], attn_drop_rate=bn_args['attn_drop_rate'], drop_path_rate=bn_args['drop_path_rate'], norm_cfg=norm_cfg,\
+                            pos_embed_interp=bn_args['pos_embed_interp'], random_init=bn_args['random_init'], align_corners=bn_args['align_corners'],\
+                                act_layer=None, weight_init='', moe_mlp_ratio=bn_args['moe_mlp_ratio'], moe_experts=args.moe_experts, moe_top_k=bn_args['moe_top_k'], world_size=moe_world_size,\
+                                    gate_dim=gate_model.num_features,)
+            backbone = VisionTransformerMoCoWithGate(backbone, gate_model)
+        else:
+            
+            backbone = TokenVisionTransformerMoE(model_name=bn_args['model_name'],\
+                img_size=bn_args['img_size'], patch_size=bn_args['patch_size'], in_chans=bn_args['in_chans'], embed_dim=bn_args['embed_dim'], depth=bn_args['depth'],\
+                    num_heads=bn_args['num_heads'], num_classes=bn_args['num_classes'], mlp_ratio=bn_args['mlp_ratio'], qkv_bias=bn_args['qkv_bias'], qk_scale=None, representation_size=None, distilled=bn_args['distilled'],\
+                        drop_rate=bn_args['drop_rate'], attn_drop_rate=bn_args['attn_drop_rate'], drop_path_rate=bn_args['drop_path_rate'], hybrid_backbone=None, norm_cfg=norm_cfg,\
+                            pos_embed_interp=bn_args['pos_embed_interp'], random_init=bn_args['random_init'], align_corners=bn_args['align_corners'],\
+                                act_layer=None, weight_init='', moe_mlp_ratio=bn_args['moe_mlp_ratio'], moe_experts=args.moe_experts, moe_top_k=bn_args['moe_top_k'], world_size=moe_world_size, gate_dim=bn_args['gate_dim'],\
+                                    moe_gate_type=args.moe_gate_type, vmoe_noisy_std=args.vmoe_noisy_std,\
+                                        gate_task_specific_dim=args.gate_task_specific_dim, multi_gate=args.multi_gate,
+                                        num_experts_pertask = args.num_experts_pertask, num_tasks = args.num_tasks,
+                                        gate_input_ahead = args.gate_input_ahead)
+        linear_keyword = 'head'
+        backbone_channels = 2048
+
     
     else:
         raise NotImplementedError
@@ -280,16 +317,25 @@ def get_head(p, backbone_channels, task):
         head = HighResolutionHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
 
     elif p['head'] == 'VisionTransformerUpHead':
-        from models.test_vit_up_head import VisionTransformerUpHead
+        from models.vit_up_head import VisionTransformerUpHead
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         hd_args = p['head_kwargs']
         head = VisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
             norm_cfg = norm_cfg, \
                 num_conv=hd_args['num_conv'], upsampling_method=hd_args['upsampling_method'],\
                 num_upsampe_layer=hd_args['num_upsampe_layer'], conv3x3_conv1x1=hd_args['conv3x3_conv1x1'],p=p,\
-                    in_channels=hd_args['in_channels'],channels=hd_args['channels'],in_index=hd_args['in_index'],num_classes=p.TASKS.NUM_OUTPUT[task],\
+                    in_channels=hd_args['in_channels'],channels=hd_args['channels'],num_classes=p.TASKS.NUM_OUTPUT[task],\
                         align_corners=hd_args['align_corners'],)
-
+    elif p['head'] == 'TokenVisionTransformerUpHead':
+        from models.token_vit_up_head import TokenVisionTransformerUpHead
+        norm_cfg = dict(type='SyncBN', requires_grad=True)
+        hd_args = p['head_kwargs']
+        head = TokenVisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
+            norm_cfg = norm_cfg, \
+                num_conv=hd_args['num_conv'], upsampling_method=hd_args['upsampling_method'],\
+                num_upsampe_layer=hd_args['num_upsampe_layer'], conv3x3_conv1x1=hd_args['conv3x3_conv1x1'],p=p,\
+                    in_channels=hd_args['in_channels'],channels=hd_args['channels'],num_classes=p.TASKS.NUM_OUTPUT[task],\
+                        align_corners=hd_args['align_corners'],)
     else:
         raise NotImplementedError
 
@@ -311,10 +357,15 @@ def get_model(p,args=None):
 
     elif p['setup'] == 'multi_task':
         if p['model'] == 'baseline':
-            from models.test_models import MultiTaskModel
+            from models.models import MultiTaskModel
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
             model = MultiTaskModel(backbone, heads, p.TASKS.NAMES,p=p)
-        
+
+        if p['model'] == 'token_moe':
+            from models.models import TokenMultiTaskModel
+            heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
+            model = TokenMultiTaskModel(backbone, heads, p.TASKS.NAMES,p=p)        
+
         elif p['model'] == 'mixture_baseline':
             from models.models import MultiTaskModel_Mixture
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})

@@ -18,6 +18,7 @@ import pickle
 from os.path import join
 from utils.moe_utils import collect_noisy_gating_loss,collect_semregu_loss, collect_regu_subimage_loss
 from utils.tracing import handle_forward_hook_data
+from utils.wandb_logger import WandbLogger
 def get_loss_meters(p):
     """ Return dictionary with loss meters to monitor training """
     all_tasks = p.ALL_TASKS.NAMES
@@ -196,6 +197,7 @@ def train_mixture_vanilla(p, train_loader, model,prior_model, criterion, optimiz
 
     return eval_results
 
+'''
 def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer, epoch):
     """ Vanilla training with fixed loss weights """
     losses = get_loss_meters(p)
@@ -283,8 +285,9 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
     eval_results = performance_meter.get_score(verbose = True)
 
     return eval_results
+'''
 
-def test_train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer, epoch):
+def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer, epoch, wandb_logger=None):
     """ Vanilla training with fixed loss weights - test version with cv_losses from blocks """
     losses = get_loss_meters(p)
     performance_meter = PerformanceMeter(p)
@@ -315,7 +318,7 @@ def test_train_vanilla_distributed(args, p, train_loader, model, criterion, opti
                 performance_meter.update({single_task: get_output(output[single_task], single_task)},
                                  {single_task: targets[single_task]})
 
-                if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                     # gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
 
                     # Add CV losses from blocks
@@ -326,7 +329,7 @@ def test_train_vanilla_distributed(args, p, train_loader, model, criterion, opti
                     losses['gating'].update(cv_loss_total)
                 # Backward
                 loss_dict['total'].backward()
-            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                     model.allreduce_params()
 
             optimizer.step()
@@ -341,7 +344,7 @@ def test_train_vanilla_distributed(args, p, train_loader, model, criterion, opti
             # Measure loss and performance
             loss_dict = criterion(output, targets)
 
-            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
 
                 # Add CV losses from blocks
                 cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
@@ -360,14 +363,24 @@ def test_train_vanilla_distributed(args, p, train_loader, model, criterion, opti
                                     {t: targets[t] for t in p.TASKS.NAMES})
             # Backward
             optimizer.zero_grad(set_to_none=True)
+            import sys
+            sys.stdout.flush()
             loss_dict['total'].backward()
-            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+            sys.stdout.flush()
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                 model.allreduce_params()
             optimizer.step()
 
 
         if i % 25 == 0:
             progress.display(i)
+
+            # Log to wandb every 25 iterations
+            if wandb_logger is not None:
+                step = epoch * len(train_loader) + i
+                wandb_logger.log_train_losses(losses, p)
+                wandb_logger.log({"iteration": step})
+
             # for name, param in model.named_parameters():
             #     if 'gamma' in name:
             #         print('gamma',param)
@@ -377,5 +390,10 @@ def test_train_vanilla_distributed(args, p, train_loader, model, criterion, opti
             #     print('regu_subimage_loss',regu_subimage_loss)
 
     eval_results = performance_meter.get_score(verbose = True)
+
+    # Log epoch-level training metrics to wandb
+    if wandb_logger is not None:
+        wandb_logger.log_train_performance(eval_results, p)
+        wandb_logger.log_epoch(epoch)
 
     return eval_results

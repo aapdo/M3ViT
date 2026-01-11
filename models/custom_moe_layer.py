@@ -177,8 +177,8 @@ class FMoETransformerMLP(FMoE):
             assert self.multi_gate is False
             size = gate_inp.shape[0]
             gate_inp = torch.cat((gate_inp,task_specific_feature.repeat(size,1)),dim=-1)
-        output = self.forward_moe(gate_inp=gate_inp, moe_inp=inp, task_id=task_id, sem=sem)
-        return output.reshape(original_shape)
+        output, clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.forward_moe(gate_inp=gate_inp, moe_inp=inp, task_id=task_id, sem=sem)
+        return output.reshape(original_shape), clean_logits, noisy_logits, noise_stddev, top_logits, gates
 
 
     def forward_moe(self, gate_inp, moe_inp, task_id=None, sem=None):
@@ -212,9 +212,9 @@ class FMoETransformerMLP(FMoE):
 
         if (task_id is not None) and self.multi_gate:
             # print('in custom moe_layer,task_id',task_id)
-            gate_top_k_idx, gate_score = self.gate[task_id](gate_inp)
+            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp)
         else:
-            gate_top_k_idx, gate_score = self.gate(gate_inp, task_id=task_id,sem=sem)
+            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate(gate_inp, task_id=task_id,sem=sem)
 
         if self.expert_prune:
             gate_score = torch.where(gate_score>self.prune_threshold,gate_score,0.)
@@ -311,4 +311,4 @@ class FMoETransformerMLP(FMoE):
         assert all(
             [batch_size == moe_outp_batch_size[0] for batch_size in moe_outp_batch_size]
         ), "MoE outputs must have the same batch size"
-        return moe_outp
+        return moe_outp, clean_logits, noisy_logits, noise_stddev, top_logits, gates

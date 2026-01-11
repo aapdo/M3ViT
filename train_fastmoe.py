@@ -15,7 +15,8 @@ from utils.common_config import get_train_dataset, get_transformations,\
                                 get_optimizer, get_model, adjust_learning_rate,\
                                 get_criterion
 from utils.logger import Logger
-from train.train_utils import train_vanilla,train_vanilla_distributed, test_train_vanilla_distributed
+from utils.wandb_logger import WandbLogger, set_wandb_logger
+from train.train_utils import train_vanilla,train_vanilla_distributed
 from evaluation.evaluate_utils import eval_model, validate_results, save_model_predictions,\
                                     eval_all_results,validate_results_v2
 from termcolor import colored
@@ -149,6 +150,13 @@ parser.add_argument('--tam_level2',default=None, type=str2bool, help='use tamlev
 parser.add_argument('--resume', default='', help='resume from checkpoint')
 parser.add_argument('--time', action='store_true', help='if wanna get inference time')
 parser.add_argument('--forward_hook', default=False, type=str2bool, help='whether to enable forward hooks for layer output logging')
+
+# Wandb arguments
+parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
+parser.add_argument('--wandb_project', type=str, default='m3vit-training', help='wandb project name')
+parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity (team name)')
+parser.add_argument('--wandb_name', type=str, default=None, help='wandb run name')
+
 args = parser.parse_args()
 
 if args.task_one_hot:
@@ -264,10 +272,10 @@ def main():
 
     # Monkey patch to log all class initializations
     try:
-        from models import vision_transformer_moe, custom_moe_layer, vit_up_head, models as models_module
-        from models.gate_funs import noisy_gate_vmoe, noisy_gate
+        from models import vision_transformer_moe, custom_moe_layer, vit_up_head, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head, models as models_module
+        from models.gate_funs import noisy_gate_vmoe, noisy_gate, token_noisy_gate_vmoe
 
-        modules_to_patch = [vision_transformer_moe, custom_moe_layer, noisy_gate_vmoe, noisy_gate, vit_up_head, models_module]
+        modules_to_patch = [vision_transformer_moe, custom_moe_layer, noisy_gate_vmoe, noisy_gate, token_noisy_gate_vmoe, vit_up_head, models_module, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head]
         original_inits = patch_and_log_initializations(modules_to_patch, args)
     except Exception as e:
         print(f"Warning: Could not patch some modules for initialization logging: {e}")
@@ -288,7 +296,7 @@ def main():
         if args.local_rank is not None:
             torch.cuda.set_device(args.local_rank)
             model.cuda(args.local_rank)
-            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                 print('Use fast moe distributed learning==================>>')
                 model = fmoe.DistributedGroupedDataParallel(model, device_ids=[args.local_rank],find_unused_parameters=True,)
                 sync_weights(model, except_key_words=["mlp.experts.h4toh", "mlp.experts.htoh4"])
@@ -296,7 +304,7 @@ def main():
                 model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],find_unused_parameters=True)
         else:
             model.cuda()
-            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                 model = fmoe.DistributedGroupedDataParallel(model)
             else:
                 model = torch.nn.parallel.DistributedDataParallel(model)
@@ -446,6 +454,20 @@ def main():
             elif task == 'edge':
                 best_result[task] = {'odsF': 0.0}  
     
+    # Initialize wandb logger (only on rank 0)
+    wandb_logger = WandbLogger(enabled=(args.use_wandb and args.local_rank == 0))
+    if wandb_logger.enabled:
+        wandb_logger.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_name,
+            config=None  # Will be set by log_config
+        )
+        wandb_logger.log_config(p, args)
+
+    # Set as global instance
+    set_wandb_logger(wandb_logger)
+
     # Main loop
     print(colored('Starting main loop', 'blue'))
 
@@ -457,19 +479,25 @@ def main():
         lr = adjust_learning_rate(p, optimizer, epoch)
         print('Adjusted learning rate to {:.5f}'.format(lr))
 
-        # Train 
+        # Log learning rate to wandb
+        wandb_logger.log_learning_rate(lr)
+
+        # Train
         print('Train ...')
         # eval_train = train_vanilla_distributed(args, p, train_dataloader, model, criterion, optimizer, epoch)
-        eval_train = test_train_vanilla_distributed(args, p, train_dataloader, model, criterion, optimizer, epoch)
+        eval_train = train_vanilla_distributed(args, p, train_dataloader, model, criterion, optimizer, epoch, wandb_logger=wandb_logger)
         
 
         # Evaluate
         # Check if need to perform eval first
         if 'eval_final_10_epochs_only' in p.keys() and p['eval_final_10_epochs_only']: # To speed up -> Avoid eval every epoch, and only test during final 10 epochs.
             if epoch + 1 > p['epochs']-10:
+                # Always evaluate during final 10 epochs
                 eval_bool = True
             else:
-                eval_bool = False
+                # Before final 10 epochs, evaluate according to eval_interval
+                eval_interval = p.get('eval_interval', 1)  # Default to every epoch if not specified
+                eval_bool = ((epoch + 1) % eval_interval == 0)
         else:
             eval_bool = True
 
@@ -488,13 +516,21 @@ def main():
             # Re-enable forward hooks after evaluation
             if args.forward_hook and hasattr(args, 'batch_counter'):
                 args.batch_counter['enabled'] = True
+
+            # Log validation results to wandb
+            wandb_logger.log_val_performance(curr_result, p)
+
             # improves, best_result = validate_results_v2(p, curr_result, best_result)
             improves, best_result = validate_results(p, curr_result, best_result)
+
+            # Log best results to wandb
+            wandb_logger.log_best_results(best_result, p)
+
             print('Checkpoint ...')
 
             save_state_dict = model.state_dict()
 
-            moe_save = p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed)
+            moe_save = (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed)
             save_checkpoint({
                 'epoch': epoch + 1,
                 'backbone': p['backbone'],
@@ -512,7 +548,7 @@ def main():
         args.batch_counter['enabled'] = False
 
     # Evaluate best model at the end
-    if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
+    if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
         # state_dict = read_specific_group_experts(checkpoint['state_dict'], args.local_rank, args.moe_experts)
         checkpoint_specific = torch.load(os.path.join(p['best_model'], "{}.pth".format(torch.distributed.get_rank())), map_location="cpu")
         checkpoint = torch.load(os.path.join(p['best_model'], "0.pth".format(torch.distributed.get_rank())), map_location="cpu")
@@ -529,6 +565,9 @@ def main():
     if args.distributed:
         torch.distributed.barrier()
     eval_stats = eval_all_results(p)
+
+    # Finish wandb run
+    wandb_logger.finish()
 
 
 def sanity_check(state_dict, pretrained_weights, linear_keyword):

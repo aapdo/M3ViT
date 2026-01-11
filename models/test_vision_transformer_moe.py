@@ -88,6 +88,7 @@ def cv_squared(x):
     if x.shape[0] == 1:
         return torch.Tensor([0])
     return x.float().var() / (x.float().mean() ** 2 + eps)
+
 def _cfg(url='', **kwargs):
     return {
         'url': url,
