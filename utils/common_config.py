@@ -361,7 +361,7 @@ def get_model(p,args=None):
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
             model = MultiTaskModel(backbone, heads, p.TASKS.NAMES,p=p)
 
-        if p['model'] == 'token_moe':
+        elif p['model'] == 'token_moe':
             from models.models import TokenMultiTaskModel
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
             model = TokenMultiTaskModel(backbone, heads, p.TASKS.NAMES,p=p)        
