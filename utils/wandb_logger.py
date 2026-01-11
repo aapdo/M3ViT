@@ -154,6 +154,13 @@ class WandbLogger:
         if 'total' in losses:
             metrics["train/total_loss"] = losses['total'].avg
 
+        # TAM (Task Attention Module) level losses
+        for task in p.TASKS.NAMES:
+            for level in range(3):  # tam_level0, tam_level1, tam_level2
+                tam_key = f'tam_level{level}_{task}'
+                if tam_key in losses:
+                    metrics[f"train/tam_level{level}_loss_{task}"] = losses[tam_key].avg
+
         # Multi-level losses (if applicable)
         if p.get('multi_level', False):
             for task in p.TASKS.NAMES:

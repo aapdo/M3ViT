@@ -503,7 +503,8 @@ class VisionTransformerMoE(nn.Module):
         self.w = int(self.img_size[1]/self.patch_size)
 
         self.num_stages = self.depth
-        self.out_indices = tuple(range(self.num_stages))
+        # Only keep the last stage output to save memory (decoder only uses the last one)
+        self.out_indices = (self.num_stages - 1,)
 
         self.num_token = 2 if distilled else 1
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
@@ -669,7 +670,7 @@ class VisionTransformerMoE(nn.Module):
             task_specific = torch.zeros(self.num_tasks,device=x.device)
             task_specific[task_id]=1.0
             task_specific_feature = self.gate_task_represent(task_specific)
-        outs = []
+        out = None
         total_cv_loss = x.new_tensor(0.0)
 
         for i, blk in enumerate(self.blocks):
@@ -681,9 +682,9 @@ class VisionTransformerMoE(nn.Module):
                 x, _ = blk(x)
 
             if i in self.out_indices:
-                outs.append(x)
+                out = x
 
-        return tuple(outs), total_cv_loss
+        return out, total_cv_loss
 
     def forward(self, x, gate_inp=None, task_id=None,sem=None):
         if sem is not None and (self.regu_sem or self.sem_force):

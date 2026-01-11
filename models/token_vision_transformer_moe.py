@@ -526,7 +526,8 @@ class TokenVisionTransformerMoE(nn.Module):
         self.w = int(self.img_size[1]/self.patch_size)
 
         self.num_stages = self.depth
-        self.out_indices = tuple(range(self.num_stages))
+        # Only keep the last stage output to save memory (decoder only uses the last one)
+        self.out_indices = (self.num_stages - 1,)
 
         self.num_token = 2 if distilled else 1
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)

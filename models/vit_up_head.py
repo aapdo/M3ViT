@@ -147,7 +147,7 @@ class VisionTransformerUpHead(BaseDecodeHead):
                 nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x):
-        x = self._transform_inputs(x)
+        # x = self._transform_inputs(x)
         # print('before head',x.shape)
         if x.dim() == 3:
             if x.shape[1] % 48 != 0:
