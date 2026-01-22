@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.cnn import build_norm_layer
+from torch.utils.checkpoint import checkpoint
+
 class TamModule(nn.Module):
     def __init__(self, p, tasks, input_channels, norm_cfg = None):
         super(TamModule, self).__init__() 
@@ -56,13 +58,41 @@ class TamModule(nn.Module):
         self.layers3 = nn.ModuleDict(layers3)
         self.layers4 = nn.ModuleDict(layers4)
 
+    def _block0(self, x):
+        """Initial conv block with checkpointing"""
+        x = self.layers0(x)
+        x = F.relu(x, inplace=False)  # Changed to inplace=False for checkpoint safety
+        x = self.layers1(x)
+        return torch.sigmoid(x)
+
+    def _block2(self, x):
+        """Second conv block with checkpointing"""
+        x = self.layers2(x)
+        return F.relu(x, inplace=False)  # Changed to inplace=False for checkpoint safety
+
+    def _encoder_block(self, x):
+        """Encoder block (2x downsampling) with checkpointing"""
+        x = self.encoder0(x)
+        x = F.relu(x, inplace=False)  # Changed to inplace=False for checkpoint safety
+        x = self.encoder1(x)
+        return F.relu(x, inplace=False)  # Changed to inplace=False for checkpoint safety
+
+    def _decoder_block(self, x):
+        """Decoder block (2x upsampling) with checkpointing"""
+        x = self.decoder0(x)
+        x = F.relu(x, inplace=False)  # Changed to inplace=False for checkpoint safety
+        x = self.decoder1(x)
+        return torch.sigmoid(x)
+
     def forward(self,deepfeature):
         batch,input_channels,H,W=deepfeature[self.tasks[0]].shape
         featurelist = [deepfeature[t] for t in self.tasks]
         featureinput = torch.stack(featurelist,dim=1).reshape(batch,len(self.tasks)*input_channels,H,W).clone()
-        featureinput = self.layers0(featureinput)
-        featureinput = F.relu(featureinput, inplace=True)
-        B = F.sigmoid(self.layers1(featureinput))
+
+        # Apply checkpointing to block0 (layers0 + layers1)
+        B = checkpoint(self._block0, featureinput, use_reentrant=False)
+
+        # Gating logic (concat with attention weights)
         if len(self.tasks)==2:
             Fb = torch.cat((deepfeature[self.tasks[0]]*B,deepfeature[self.tasks[1]]*(1-B)),dim=1)
         elif len(self.tasks)==3:
@@ -71,20 +101,17 @@ class TamModule(nn.Module):
             Fb = torch.cat((deepfeature[self.tasks[0]]*B/2,deepfeature[self.tasks[1]]*B/2,deepfeature[self.tasks[2]]*(1-B)/2,deepfeature[self.tasks[3]]*(1-B)/2),dim=1)
         elif len(self.tasks)==5:
             Fb = torch.cat((deepfeature[self.tasks[0]]*B/2,deepfeature[self.tasks[1]]*B/2,deepfeature[self.tasks[2]]*(1-B)/3,deepfeature[self.tasks[3]]*(1-B)/3,deepfeature[self.tasks[4]]*(1-B)/3),dim=1)
-        Fb = self.layers2(Fb)
-        Fb = F.relu(Fb, inplace=True)
-        # Fb = self.layers3(Fb)
-        Fb = self.encoder0(Fb)
-        Fb = F.relu(Fb, inplace=True)
-        # print('after encoder0',Fb.shape)
-        Fb = self.encoder1(Fb)
-        Fb = F.relu(Fb, inplace=True)
-        # print('after encoder1',Fb.shape)
-        Fb = self.decoder0(Fb)
-        Fb = F.relu(Fb, inplace=True)
-        # print('after decoder0',Fb.shape)
-        M = F.sigmoid(self.decoder1(Fb))
-        # print('after decoder1',M.shape)
+
+        # Apply checkpointing to block2
+        Fb = checkpoint(self._block2, Fb, use_reentrant=False)
+
+        # Apply checkpointing to encoder block (2x downsampling)
+        Fb = checkpoint(self._encoder_block, Fb, use_reentrant=False)
+
+        # Apply checkpointing to decoder block (2x upsampling)
+        M = checkpoint(self._decoder_block, Fb, use_reentrant=False)
+
+        # Final feature aggregation with modulation
         if len(self.tasks)==2:
             Ftam = torch.cat((deepfeature[self.tasks[0]]*(1+M),deepfeature[self.tasks[1]]*(1+M)),dim=1)
         elif len(self.tasks)==3:
@@ -93,11 +120,17 @@ class TamModule(nn.Module):
             Ftam = torch.cat((deepfeature[self.tasks[0]]*(1+M),deepfeature[self.tasks[1]]*(1+M),deepfeature[self.tasks[2]]*(1+M),deepfeature[self.tasks[3]]*(1+M)),dim=1)
         elif len(self.tasks)==5:
             Ftam = torch.cat((deepfeature[self.tasks[0]]*(1+M),deepfeature[self.tasks[1]]*(1+M),deepfeature[self.tasks[2]]*(1+M),deepfeature[self.tasks[3]]*(1+M),deepfeature[self.tasks[4]]*(1+M)),dim=1)
+
+        # Apply checkpointing to task-specific heads
         out = {}
         for task in self.tasks:
-            feature = self.layers3[task](Ftam)
-            feature = F.relu(feature, inplace=True)
-            out[task] = self.layers4[task](feature)
+            def task_head(x, task=task):  # Capture task as default argument
+                x = self.layers3[task](x)
+                x = F.relu(x, inplace=False)  # Changed to inplace=False for checkpoint safety
+                return self.layers4[task](x)
+
+            out[task] = checkpoint(task_head, Ftam, use_reentrant=False)
+
         return out
 
 
