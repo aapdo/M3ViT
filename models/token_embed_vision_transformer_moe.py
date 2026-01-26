@@ -554,10 +554,12 @@ class TokenVisionTransformerMoE(nn.Module):
         self.num_tasks = gate_dim-embed_dim
         self.gate_task_specific_dim = gate_task_specific_dim
         self.gate_input_ahead = gate_input_ahead
-        if self.gate_task_specific_dim<0 or self.multi_gate:
-            self.gate_task_represent = None
-        else:
-            self.gate_task_represent = new_Mlp(in_features=self.num_tasks, hidden_features=int(self.gate_task_specific_dim), out_features=self.gate_task_specific_dim,)
+
+        # if self.gate_task_specific_dim<0 or self.multi_gate:
+            # self.gate_task_represent = None
+        # else:
+        self.gate_task_represent = new_Mlp(in_features=self.num_tasks, hidden_features=int(self.gate_task_specific_dim), out_features=self.gate_task_specific_dim,)
+
             # self.gamma = nn.Parameter(torch.Tensor([1]), requires_grad=True)
         for i in range(self.depth):
             if i % 2 == 0:
@@ -655,12 +657,6 @@ class TokenVisionTransformerMoE(nn.Module):
         x = self.pos_drop(x)
 
         task_specific_feature = None
-
-        # TODO: support task conditioned router embedding
-        # if (task_id is not None) and (self.gate_task_represent is not None):
-        #     task_specific = torch.zeros(self.num_tasks,device=x.device)
-        #     task_specific[task_id]=1.0
-        #     task_specific_feature = self.gate_task_represent(task_specific)
 
         # Initialize dict to store outputs for each task
         outs = {task: x for task in range(self.num_tasks)}

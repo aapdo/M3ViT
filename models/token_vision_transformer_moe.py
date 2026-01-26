@@ -21,8 +21,87 @@ from torch.utils.checkpoint import checkpoint
 
 from .gates import NoisyGate_VMoE as Custom_VMoE
 from models.moe import TaskMoE
+from models.router_state import RouterState, selector_to_bits, popcount_bits, bits_to_task_masks, bits_to_multihot
+from models.aggregation_stages import AggregationStage
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
+
+
+class RouterSelector(nn.Module):
+    def __init__(self, d_model, d_task_emb=0, temperature=1.0, hard=False):
+        """
+        Router selector that determines whether each token uses task-specific or shared gate.
+
+        Args:
+            d_model: Input feature dimension
+            d_task_emb: Task embedding dimension. If > 0, task_emb is expected in forward
+            temperature: Gumbel-Softmax temperature
+            hard: Whether to use hard selection in training
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.d_task_emb = d_task_emb
+        d_input = d_model + d_task_emb if d_task_emb > 0 else d_model
+
+        # Output dimension is 2: [task-specific, shared]
+        self.w_gate = nn.Parameter(
+            torch.zeros(d_input, 2), requires_grad=True
+        )
+        self.temperature = temperature
+        self.hard = hard
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.kaiming_uniform_(self.w_gate, a=math.sqrt(5))
+
+    def forward(self, inp, task_emb=None):
+        """
+        Returns selection probabilities/decisions for using shared_gate.
+
+        Args:
+            inp: Input tensor [B, N, D] or [B*N, D]
+            task_emb: Task embedding tensor [E], [B, E], or [B, N, E]
+
+        Returns:
+            Tensor [B, N] or [B*N]: probability or binary selection (0=task-specific, 1=shared)
+        """
+        shape_input = list(inp.shape)
+        original_shape = shape_input[:-1]
+        channel = shape_input[-1]
+        inp_flat = inp.reshape(-1, channel)
+        BN = inp_flat.shape[0]
+
+        if task_emb is not None:
+            if task_emb.dim() == 1:
+                task_emb_flat = task_emb.unsqueeze(0).expand(BN, -1)
+            elif task_emb.dim() == 2:
+                B = shape_input[0] if len(shape_input) > 1 else 1
+                N = BN // B
+                task_emb_flat = task_emb.unsqueeze(1).expand(B, N, -1).reshape(BN, -1)
+            else:
+                task_emb_flat = task_emb.reshape(BN, -1)
+            gate_inp = torch.cat([inp_flat, task_emb_flat], dim=-1)
+        else:
+            gate_inp = inp_flat
+
+        logits = gate_inp @ self.w_gate
+
+        if self.training:
+            probs = torch.nn.functional.gumbel_softmax(
+                logits, tau=self.temperature, hard=self.hard, dim=-1
+            )
+        else:
+            probs = torch.nn.functional.gumbel_softmax(
+                logits, tau=self.temperature, hard=True, dim=-1
+            )
+
+        output = probs[:, 1]
+
+        if len(original_shape) > 1:
+            output = output.reshape(*original_shape)
+
+        return output
 
 
 class Aggregation(nn.Module):
@@ -312,6 +391,7 @@ class Block(nn.Module):
         self.moe = moe
         self.moe_top_k = moe_top_k
         self.tot_expert = moe_experts
+        self.num_tasks = num_tasks
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
@@ -322,6 +402,17 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.gate_input_ahead = gate_input_ahead
 
+        # Aggregation stages (Phase 2 refactoring)
+        # Each stage creates its own Aggregation module
+        # - attn_post_aggr: aggregation after attention, before LN2 (uses prev_state)
+        # - mlp_post_aggr: aggregation after MLP (uses curr_state, MoE only)
+        if num_tasks > 0:
+            self.attn_post_aggr = AggregationStage(Aggregation(), num_tasks)
+            self.mlp_post_aggr = AggregationStage(Aggregation(), num_tasks) if moe else None
+        else:
+            self.attn_post_aggr = None
+            self.mlp_post_aggr = None
+
         if moe:
             activation = nn.Sequential(
                 act_layer(),
@@ -329,24 +420,59 @@ class Block(nn.Module):
             )
             if moe_gate_dim < 0:
                 moe_gate_dim = dim
+            self.moe_gate_dim = moe_gate_dim
             if moe_mlp_ratio < 0:
                 moe_mlp_ratio = mlp_ratio
             moe_hidden_dim = int(dim * moe_mlp_ratio)
 
-            if moe_gate_type == "noisy":
-                moe_gate_fun = NoisyGate
-            elif moe_gate_type == "noisy_vmoe":
-                moe_gate_fun = NoisyGate_VMoE
-            elif moe_gate_type == "token_noisy_vmoe":
-                moe_gate_fun = TokenNoisyGate_VMoE
-            else:
-                raise ValueError("unknow gate type of {}".format(moe_gate_type))
+            # Store gate parameters for routing
+            self.gate_task_specific_dim = gate_task_specific_dim
+            self.multi_gate = multi_gate
+            self.world_size = world_size
+            self.num_experts_pertask = num_experts_pertask
 
-            self.mlp = TokenFMoETransformerMLP(num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
-                                          world_size=world_size, top_k=moe_top_k, activation=activation, gate=moe_gate_fun,
-                                          vmoe_noisy_std=vmoe_noisy_std, gate_task_specific_dim=gate_task_specific_dim,multi_gate=multi_gate,
-                                          num_experts_pertask = num_experts_pertask, num_tasks = num_tasks
-                                        )
+            # Gate input dimension
+            # - shared gate: always uses task embedding (multi-hot)
+            # - task-specific gate: uses task embedding only if single gate (not multi_gate)
+            if gate_task_specific_dim < 0:
+                d_gate_with_emb = dim
+                d_gate_no_emb = dim
+            else:
+                d_gate_with_emb = dim + gate_task_specific_dim
+                d_gate_no_emb = dim
+
+            # RouterSelector - determines shared vs task-specific
+            d_task_emb = gate_task_specific_dim if gate_task_specific_dim > 0 else 0
+            self.router_selector = RouterSelector(d_model=dim, d_task_emb=d_task_emb, temperature=1.0, hard=False)
+
+            # Shared gate - always receives multi-hot task embedding
+            self.shared_gate = TokenNoisyGate_VMoE(
+                d_gate_with_emb, moe_experts, world_size, moe_top_k,
+                noise_std=vmoe_noisy_std, num_experts_pertask=num_experts_pertask, num_tasks=num_tasks
+            )
+
+            # Task-specific gate(s)
+            if multi_gate:
+                # Separate gate per task - no task embedding needed
+                self.gate = nn.ModuleList([
+                    TokenNoisyGate_VMoE(
+                        d_gate_no_emb, moe_experts, world_size, moe_top_k,
+                        noise_std=vmoe_noisy_std, num_experts_pertask=num_experts_pertask, num_tasks=num_tasks
+                    )
+                    for _ in range(num_tasks)
+                ])
+            else:
+                # Single gate for all tasks - needs task embedding to distinguish
+                self.gate = TokenNoisyGate_VMoE(
+                    d_gate_with_emb, moe_experts, world_size, moe_top_k,
+                    noise_std=vmoe_noisy_std, num_experts_pertask=num_experts_pertask, num_tasks=num_tasks
+                )
+
+            # MoE MLP (experts only, no gates)
+            self.mlp = TokenFMoETransformerMLP(
+                num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
+                world_size=world_size, top_k=moe_top_k, activation=activation
+            )
             self.mlp_drop = nn.Dropout(drop)
 
         else:
@@ -426,70 +552,358 @@ class Block(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def _ckpt_moe(self, x, gate_inp, task_specific_feature, selector_output, task_id_tensor):
-        """Checkpointed MoE forward: attn + norm2 + mlp, returns (x, importance, load)"""
-        # attn + norm2
-        x = x + self.drop_path(self.attn(self.norm1(x)))
+    # --------------------------
+    # Phase 1 Refactoring: Split into forward_attn and forward_mlp
+    # This allows aggregation to be inserted between attention and MLP
+    # --------------------------
+
+    def _attn_only(self, x):
+        """Internal checkpointed function: attention only"""
+        return x + self.drop_path(self.attn(self.norm1(x)))
+
+    def _forward_attn(self, x):
+        """
+        Execute attention part only: LN1 -> Attn -> Residual
+
+        Args:
+            x: Input tensor [B, N, C]
+
+        Returns:
+            x: Output after attention [B, N, C]
+        """
+        if self.training:
+            return checkpoint(self._attn_only, x, use_reentrant=False)
+        else:
+            return self._attn_only(x)
+
+    def _mlp_dense_inner(self, x):
+        """Internal checkpointed function: Dense MLP only"""
+        normed_x = self.norm2(x)
+        return x + self.drop_path(self.mlp(normed_x))
+
+    def _forward_mlp_dense(self, x):
+        """
+        Execute dense MLP: LN2 -> Dense MLP -> Residual
+
+        Args:
+            x: Input tensor [B, N, C]
+
+        Returns:
+            x: Output after MLP [B, N, C]
+        """
+        if self.training:
+            return checkpoint(self._mlp_dense_inner, x, use_reentrant=False)
+        else:
+            return self._mlp_dense_inner(x)
+
+    def _mlp_moe_inner(self, x, selector_output, task_id, task_emb, gate_shared_emb):
+        """Internal checkpointed function: MoE routing + MLP
+
+        Args:
+            x: Input tensor [B, N, C]
+            selector_output: [B, N] router selector output
+            task_id: Task ID for selecting task-specific gate (int)
+            task_emb: [E] one-hot task embedding for task-specific gate
+            gate_shared_emb: [B, N, E] multi-hot embedding for shared gate
+
+        Returns:
+            output: x + residual [B, N, C]
+            gate_info: dict with gate statistics for cv_loss computation
+        """
         normed_x = self.norm2(x)
 
-        task_id = int(task_id_tensor.item())
+        # Route tokens through gates
+        gate_top_k_idx, gate_score, gate_info = self._route_tokens(
+            normed_x,
+            selector_output=selector_output,
+            task_id=task_id,
+            task_emb=task_emb,
+            gate_shared_emb=gate_shared_emb
+        )
 
-        moe_output, clean_logits, noisy_logits, noise_stddev, top_logits, gates = \
-            self.mlp(normed_x, gate_inp, task_id, task_specific_feature, selector_output)
+        # MoE forward
+        moe_output = self.mlp(normed_x, gate_top_k_idx, gate_score)
+        output = x + self.drop_path(self.mlp_drop(moe_output))
 
-        x = x + self.drop_path(self.mlp_drop(moe_output))
+        return output, gate_info
 
-        # Compute summaries (importance, load) - no cv_loss here
+    def _forward_mlp_moe(self, x, selector_output, task_id, task_emb, gate_shared_emb):
+        """
+        Execute MoE MLP: LN2 -> Gate routing -> MoE -> Residual
+
+        Args:
+            x: Input tensor [B, N, C]
+            selector_output: [B, N] router selector output
+            task_id: Task ID for selecting task-specific gate (int)
+            task_emb: [E] one-hot task embedding for task-specific gate
+            gate_shared_emb: [B, N, E] multi-hot embedding for shared gate
+
+        Returns:
+            x: Output after MoE [B, N, C]
+            gate_info: dict for cv_loss computation
+        """
+        if self.training:
+            return checkpoint(
+                self._mlp_moe_inner,
+                x, selector_output, task_id, task_emb, gate_shared_emb,
+                use_reentrant=False
+            )
+        else:
+            return self._mlp_moe_inner(x, selector_output, task_id, task_emb, gate_shared_emb)
+
+    def _route_tokens(self, x, selector_output, task_id, task_emb, gate_shared_emb):
+        """
+        Route tokens through appropriate gates based on selector output.
+
+        Args:
+            x: Input tensor [B, N, D] (after LN2)
+            selector_output: [B, N] router selector output
+            task_id: Task ID for selecting task-specific gate (int)
+            task_emb: [E] one-hot task embedding for task-specific gate
+            gate_shared_emb: [B, N, E] multi-hot embedding for shared gate
+
+        Returns:
+            gate_top_k_idx: [B*N, top_k] expert indices
+            gate_score: [B*N, top_k] expert scores
+            gate_info: dict with clean_logits, noisy_logits, noise_stddev, top_logits, gates
+        """
+        B, N, D = x.shape
+        device = x.device
+        B_N = B * N
+
+        # Flatten x to [B*N, D]
+        x_flat = x.reshape(B_N, D)
+
+        # Flatten selector_output to [B*N]
+        selector_flat = selector_output.reshape(-1)
+
+        # Create masks
+        shared_mask = (selector_flat > 0.5)
+        task_mask = (selector_flat <= 0.5)
+
+        # Prepare task embedding flat: [E] -> [B*N, E]
+        task_emb_flat = None
+        if task_emb is not None:
+            task_emb_flat = task_emb.unsqueeze(0).expand(B_N, -1)
+
+        # Prepare shared embedding flat: [B, N, E] -> [B*N, E]
+        shared_emb_flat = None
+        if gate_shared_emb is not None:
+            shared_emb_flat = gate_shared_emb.reshape(B_N, -1)
+
+        # Initialize output tensors
+        gate_top_k_idx = torch.zeros(B_N, self.moe_top_k, dtype=torch.long, device=device)
+        gate_score = torch.zeros(B_N, self.moe_top_k, device=device)
+
+        # Initialize tensors for cv_loss computation
+        clean_logits = torch.zeros(B_N, self.tot_expert, device=device)
+        noisy_logits = torch.zeros(B_N, self.tot_expert, device=device)
+        noise_stddev = torch.zeros(B_N, self.tot_expert, device=device)
+        top_logits = torch.zeros(B_N, self.moe_top_k + 1, device=device)
+        gates = torch.zeros(B_N, self.tot_expert, device=device)
+
+        # Route shared tokens through shared_gate
+        if shared_mask.any():
+            shared_inp = x_flat[shared_mask]
+            if shared_emb_flat is not None:
+                shared_inp = torch.cat([shared_inp, shared_emb_flat[shared_mask]], dim=-1)
+            (s_idx, s_score), s_clean, s_noisy, s_noise_std, s_top, s_gates = self.shared_gate(shared_inp)
+            gate_top_k_idx[shared_mask] = s_idx
+            gate_score[shared_mask] = s_score
+            clean_logits[shared_mask] = s_clean
+            noisy_logits[shared_mask] = s_noisy
+            noise_stddev[shared_mask] = s_noise_std
+            top_logits[shared_mask] = s_top
+            gates[shared_mask] = s_gates
+
+        # Route task-specific tokens through task-specific gate
+        if task_mask.any():
+            task_inp = x_flat[task_mask]
+            if self.multi_gate:
+                # multi_gate: separate gate per task, no need for task embedding
+                (t_idx, t_score), t_clean, t_noisy, t_noise_std, t_top, t_gates = self.gate[task_id](task_inp)
+            else:
+                # single gate: concat task embedding to distinguish tasks
+                assert task_emb_flat is not None, "task_emb required for single gate mode"
+                task_inp = torch.cat([task_inp, task_emb_flat[task_mask]], dim=-1)
+                (t_idx, t_score), t_clean, t_noisy, t_noise_std, t_top, t_gates = self.gate(task_inp, task_id=task_id)
+            gate_top_k_idx[task_mask] = t_idx
+            gate_score[task_mask] = t_score
+            clean_logits[task_mask] = t_clean
+            noisy_logits[task_mask] = t_noisy
+            noise_stddev[task_mask] = t_noise_std
+            top_logits[task_mask] = t_top
+            gates[task_mask] = t_gates
+
+        gate_info = {
+            'clean_logits': clean_logits,
+            'noisy_logits': noisy_logits,
+            'noise_stddev': noise_stddev,
+            'top_logits': top_logits,
+            'gates': gates,
+        }
+
+        return gate_top_k_idx, gate_score, gate_info
+
+    def _compute_cv_loss(self, gate_info):
+        """
+        Compute cv_loss from gate information.
+
+        Args:
+            gate_info: dict with clean_logits, noisy_logits, noise_stddev, top_logits, gates
+
+        Returns:
+            cv_loss: scalar tensor
+        """
+        gates = gate_info['gates']
+        noise_stddev = gate_info['noise_stddev']
+        clean_logits = gate_info['clean_logits']
+        noisy_logits = gate_info['noisy_logits']
+        top_logits = gate_info['top_logits']
+
         importance = gates.sum(0)  # [E]
 
-        # Compute load - check noise_stddev properly
         noise_ok = (noise_stddev is not None) and (noise_stddev.mean().item() > 1e-6)
-
         if (self.moe_top_k < self.tot_expert) and noise_ok:
             load = self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits, self.moe_top_k).sum(0)
         else:
             load = self._gates_to_load(gates)
 
-        return x, importance, load
+        return self.cv_squared(importance) + self.cv_squared(load)
 
-    def _ckpt_non_moe(self, x):
-        """Checkpointed non-MoE forward: attn + norm2 + mlp"""
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        normed_x = self.norm2(x)
-        x = x + self.drop_path(self.mlp(normed_x))
-        return x
+    def _build_router_state(self, selector_tbN: torch.Tensor) -> RouterState:
+        """
+        Build RouterState from selector outputs.
 
-    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, selector_output=None):
-        if self.gate_input_ahead:
-            gate_inp = x
+        Args:
+            selector_tbN: [T, B, N] selector outputs
 
+        Returns:
+            RouterState with shared_bits [B, N] and optional shared_selector
+        """
+        bits = selector_to_bits(selector_tbN, thr=0.5)  # [B, N] int64
+        return RouterState(shared_bits=bits, shared_selector=selector_tbN.detach())
+
+    def forward(self, outs: dict, prev_state: RouterState | None,
+                gate_inp=None, task_emb_T_E=None, gate_task_represent=None):
+        """
+        Multi-task forward with RouterState management.
+
+        Pipeline:
+        1. Attention for all tasks (LN1 -> Attn -> Residual)
+        2. Attn-post aggregation (using prev_state, if available)
+        3. MLP for all tasks (LN2 -> MLP/MoE -> Residual)
+        4. For MoE: compute selector, build curr_state, mlp-post aggregation
+
+        Args:
+            outs: Dict {task_id: tensor [B, N, C]} containing task outputs
+            prev_state: RouterState from previous MoE block (None for first MoE)
+            gate_inp: Gate input for MoE routing
+            task_emb_T_E: [T, E] cached task embeddings (one-hot based) for selector
+            gate_task_represent: MLP module to convert multi-hot to embedding for shared gate
+
+        Returns:
+            outs: Updated dict with processed outputs
+            curr_state: RouterState from this block (None for non-MoE)
+            aux: Dict with cv_loss, stats, etc.
+        """
+        aux = {
+            'cv_loss': outs[0].new_tensor(0.0),
+            'stats': {
+                'total_positions': 0,
+                'shared_positions_prev': 0,
+                'aggregated_positions_attn': 0,
+                'shared_positions_curr': 0,
+                'aggregated_positions_mlp': 0,
+            }
+        }
+
+        # (1) Attention for all tasks (checkpoint inside forward_attn)
+        for task in range(self.num_tasks):
+            outs[task] = self._forward_attn(outs[task])
+
+        B, N, _ = outs[0].shape
+        aux['stats']['total_positions'] = B * N
+
+        # (2) Attn-post aggregation (always, using prev_state if available)
+        #     This is OUTSIDE checkpoint for safety (path depends on state)
+        if prev_state is not None and self.attn_post_aggr is not None:
+            prev_bits = prev_state.shared_bits  # [B, N]
+            prev_count = popcount_bits(prev_bits, self.num_tasks)  # [B, N]
+            attn_agg_needed = (prev_count >= 2)  # [B, N]
+
+            prev_task_masks = bits_to_task_masks(prev_bits, self.num_tasks)
+            outs = self.attn_post_aggr(outs, prev_task_masks, attn_agg_needed)
+
+            # Stats
+            aux['stats']['shared_positions_prev'] = (prev_count > 0).sum().item()
+            aux['stats']['aggregated_positions_attn'] = attn_agg_needed.sum().item()
+
+        # (3) MLP execution for non-MoE block
         if not self.moe:
-            # non-moe path: fully checkpointed
-            if self.training:
-                x = checkpoint(self._ckpt_non_moe, x, use_reentrant=False)
-            else:
-                x = self._ckpt_non_moe(x)
-            return x, None, None
+            for task in range(self.num_tasks):
+                outs[task] = self._forward_mlp_dense(outs[task])
+            # Pass through prev_state unchanged (preserves previous MoE block's state)
+            return outs, prev_state, aux
 
-        # MoE path
-        task_id_tensor = torch.tensor(
-            0 if task_id is None else int(task_id),
-            device=x.device,
-            dtype=torch.int64
-        )
+        # ---- MoE block specific logic ----
 
-        if self.training:
-            x, importance, load = checkpoint(
-                self._ckpt_moe,
-                x, gate_inp, task_specific_feature, selector_output, task_id_tensor,
-                use_reentrant=False
+        # (4) Compute selector AFTER aggregation (outside checkpoint)
+        #     Selector is computed on post-aggregation representation
+        #     Pass task_emb_T_E[task] (one-hot based embedding) to selector
+        curr_selector = []
+        for task in range(self.num_tasks):
+            task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
+            curr_selector.append(self.router_selector(outs[task], task_emb=task_emb))  # [B, N]
+        curr_selector_tbN = torch.stack(curr_selector, dim=0)  # [T, B, N]
+
+        # (5) First MoE block handling: force selector to 0 (task-specific only)
+        is_first_moe = (prev_state is None)
+        if is_first_moe:
+            curr_selector_tbN = torch.zeros_like(curr_selector_tbN)
+            curr_selector = [curr_selector_tbN[t] for t in range(self.num_tasks)]
+
+        # (6) Build current state from current selector (need curr_bits for shared gate embedding)
+        curr_state = self._build_router_state(curr_selector_tbN)
+        curr_bits = curr_state.shared_bits
+        curr_count = popcount_bits(curr_bits, self.num_tasks)
+
+        # (7) Create shared gate embedding from multi-hot (if gate_task_represent available)
+        #     This embedding is used by MoE gate for tokens routed to shared_gate
+        gate_shared_emb = None
+        if gate_task_represent is not None:
+            mh = bits_to_multihot(curr_bits, self.num_tasks)  # [B, N, T]
+            gate_shared_emb = gate_task_represent(mh)  # [B, N, E]
+
+        # (8) MoE MLP for all tasks
+        #     Gate routing and MoE are done together inside _forward_mlp_moe
+        for task in range(self.num_tasks):
+            task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
+
+            # MoE forward (includes LN2, gate routing, MoE, residual)
+            outs[task], gate_info = self._forward_mlp_moe(
+                outs[task],
+                selector_output=curr_selector[task],
+                task_id=task,
+                task_emb=task_emb,
+                gate_shared_emb=gate_shared_emb
             )
-        else:
-            x, importance, load = self._ckpt_moe(
-                x, gate_inp, task_specific_feature, selector_output, task_id_tensor
-            )
 
-        return x, importance, load
+            # Accumulate cv_loss from gate_info
+            aux['cv_loss'] = aux['cv_loss'] + self._compute_cv_loss(gate_info)
+
+        # (9) MLP-post aggregation (using curr_state)
+        if self.mlp_post_aggr is not None:
+            mlp_agg_needed = (curr_count >= 2)  # [B, N]
+            curr_task_masks = bits_to_task_masks(curr_bits, self.num_tasks)
+            outs = self.mlp_post_aggr(outs, curr_task_masks, mlp_agg_needed)
+
+            # Stats
+            aux['stats']['shared_positions_curr'] = (curr_count > 0).sum().item()
+            aux['stats']['aggregated_positions_mlp'] = mlp_agg_needed.sum().item()
+
+        return outs, curr_state, aux
+
 
 class TokenVisionTransformerMoE(nn.Module):
     def __init__(self, model_name='vit_large_patch16_384', img_size=384, patch_size=16, in_chans=3, embed_dim=1024, depth=24,
@@ -497,7 +911,7 @@ class TokenVisionTransformerMoE(nn.Module):
                     drop_rate=0.1, attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=partial(nn.LayerNorm, eps=1e-6), norm_cfg=None,
                     pos_embed_interp=False, random_init=False, align_corners=False,
                     act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=8, moe_top_k=4, world_size=2, gate_dim=-1,
-                    moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=-1,multi_gate=False,
+                    moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=64,multi_gate=False,
                     num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False, 
                     **kwargs):
         super(TokenVisionTransformerMoE, self).__init__(**kwargs)
@@ -551,30 +965,32 @@ class TokenVisionTransformerMoE(nn.Module):
                                                 self.depth)]  # stochastic depth decay rule
         blocks = []
         # Todo: param에 num_task 추가.
-        self.num_tasks = gate_dim-embed_dim
+        self.num_tasks = num_tasks
         self.gate_task_specific_dim = gate_task_specific_dim
         self.gate_input_ahead = gate_input_ahead
-        if self.gate_task_specific_dim<0 or self.multi_gate:
-            self.gate_task_represent = None
-        else:
-            self.gate_task_represent = new_Mlp(in_features=self.num_tasks, hidden_features=int(self.gate_task_specific_dim), out_features=self.gate_task_specific_dim,)
+        # if self.gate_task_specific_dim<0 or self.multi_gate:
+            # self.gate_task_represent = None
+        # else:
+
+        self.gate_task_represent = new_Mlp(in_features=self.num_tasks, hidden_features=int(self.gate_task_specific_dim), out_features=self.gate_task_specific_dim,)
+
             # self.gamma = nn.Parameter(torch.Tensor([1]), requires_grad=True)
         for i in range(self.depth):
             if i % 2 == 0:
+                # Non-MoE block: also needs num_tasks for attn_post_aggr
                 blocks.append(Block(dim=self.embed_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, qkv_bias=self.qkv_bias, qk_scale=self.qk_scale,
-                drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer))
+                drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer,
+                num_tasks=self.num_tasks))
             else:
+                # MoE block
                 blocks.append(Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                               moe=True, moe_mlp_ratio=moe_mlp_ratio, moe_experts=moe_experts, moe_top_k=moe_top_k, moe_gate_dim=gate_dim, world_size=world_size,
-                              moe_gate_type=moe_gate_type, vmoe_noisy_std=vmoe_noisy_std, 
+                              moe_gate_type=moe_gate_type, vmoe_noisy_std=vmoe_noisy_std,
                               gate_task_specific_dim=self.gate_task_specific_dim,multi_gate=self.multi_gate,
-                              num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
+                              num_experts_pertask = num_experts_pertask, num_tasks = self.num_tasks,
                               gate_input_ahead = self.gate_input_ahead))
         self.blocks = nn.Sequential(*blocks)
-
-        # Initialize aggregation module
-        self.aggregation = Aggregation()
 
         # NOTE as per official impl, we could have a pre-logits representation dense layer + tanh here
         # self.repr = nn.Linear(embed_dim, representation_size)
@@ -645,208 +1061,82 @@ class TokenVisionTransformerMoE(nn.Module):
         return {'pos_embed', 'cls_token'}
 
     def forward(self, x, gate_inp=None, sem=None):
+        """
+        Simplified Forward:
+        - Delegates block-level logic to Block.forward
+        - Only handles: input prep, block iteration, state passing, aux aggregation
+        """
         B = x.shape[0]
         x = self.patch_embed(x)
         x = x.flatten(2).transpose(1, 2)
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
-        # x.shape => [Batch, Number of Token, Dimension]
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        task_specific_feature = None
-
-        # TODO: support task conditioned router embedding
-        # if (task_id is not None) and (self.gate_task_represent is not None):
-        #     task_specific = torch.zeros(self.num_tasks,device=x.device)
-        #     task_specific[task_id]=1.0
-        #     task_specific_feature = self.gate_task_represent(task_specific)
+        # Create task embedding cache: one-hot -> embedding for each task
+        # task_emb_T_E: [T, E] - cached embeddings for all tasks
+        # This is computed once and reused across all blocks
+        eye = torch.eye(self.num_tasks, device=x.device, dtype=x.dtype)  # [T, T]
+        task_emb_T_E = self.gate_task_represent(eye)  # [T, E]
 
         # Initialize dict to store outputs for each task
         outs = {task: x for task in range(self.num_tasks)}
-        prev_router_outputs = []
-        is_first_moe = True
+
+        # RouterState: stores previous MoE block selector (None for first MoE block)
+        prev_state = None
 
         # Initialize total cv_loss
         total_cv_loss = x.new_tensor(0.0)
 
         # Initialize statistics counters
         stats = {
-            'total_tokens': 0,           # Total task tokens (T * B * N)
-            'reusable_tokens': 0,        # Reused task tokens
-            'aggregated_tokens': 0,      # Aggregated task tokens
-            'shared_gate_tokens': 0,     # Shared gate task tokens
-            'total_positions': 0,        # Total positions (B * N)
-            'reusable_positions': 0,     # Reusable positions (>=2 tasks)
-            'aggregated_positions': 0,   # Aggregated positions
-            'shared_positions': 0,       # Shared gate positions (>=1 task)
-            'moe_blocks': 0
+            'moe_blocks': 0,
+            'total_positions': 0,
+            'shared_positions_prev': 0,
+            'aggregated_positions_attn': 0,
+            'shared_positions_curr': 0,
+            'aggregated_positions_mlp': 0,
         }
 
-        for i, blk in enumerate(self.blocks):
+        # Block iteration with state management
+        for blk in self.blocks:
+            outs, curr_state, aux = blk(
+                outs, prev_state,
+                gate_inp=gate_inp,
+                task_emb_T_E=task_emb_T_E,
+                gate_task_represent=self.gate_task_represent
+            )
+
+            # Accumulate cv_loss
+            total_cv_loss = total_cv_loss + aux['cv_loss']
+
+            # Accumulate stats (only MoE blocks contribute meaningful stats)
             if blk.moe:
                 stats['moe_blocks'] += 1
+                for key in ['total_positions', 'shared_positions_prev', 'aggregated_positions_attn',
+                           'shared_positions_curr', 'aggregated_positions_mlp']:
+                    stats[key] += aux['stats'].get(key, 0)
 
-                # Compute current router outputs for all tasks
-                current_router_outputs = []
-                for task in range(self.num_tasks):
-                    current_router_outputs.append(blk.mlp.router_selector(outs[task]))
-
-                if is_first_moe:
-                    # First MoE block: force all tokens to use task-specific gate (no shared_gate)
-                    # Set selector_output to 0 to force task-specific gate usage
-                    for task in range(self.num_tasks):
-                        current_router_outputs[task] = torch.zeros_like(current_router_outputs[task])
-                        outs[task], imp, load = blk(
-                            outs[task],
-                            gate_inp=gate_inp,
-                            task_id=task,
-                            task_specific_feature=task_specific_feature,
-                            selector_output=current_router_outputs[task]
-                        )
-                        # Accumulate cv_loss
-                        if (imp is not None) and (load is not None):
-                            total_cv_loss = total_cv_loss + blk.cv_squared(imp) + blk.cv_squared(load)
-                    is_first_moe = False
-                else:
-                    # Not first MoE block: analyze aggregation opportunities
-                    # For each token position [B, N], classify into three categories:
-                    # 1. prev & curr both True (>=2 tasks): reusable - compute once and copy
-                    # 2. any task has curr False: not reusable - each task computes independently
-                    # 3. prev False, curr True (>=2 tasks): compute independently, then aggregate results
-
-                    curr_shared_masks = []  # [T, B, N]: curr > 0.5
-                    prev_shared_masks = []  # [T, B, N]: prev > 0.5
-                    reusable_masks = []     # [T, B, N]: prev & curr both True
-                    aggregation_masks = []  # [T, B, N]: prev False, curr True
-
-                    for task in range(self.num_tasks):
-                        curr_mask = (current_router_outputs[task] > 0.5)  # [B, N]
-                        prev_mask = (prev_router_outputs[task] > 0.5)     # [B, N]
-                        reusable_mask = curr_mask & prev_mask              # [B, N]
-                        aggregation_mask = (~prev_mask) & curr_mask        # [B, N]: prev False, curr True
-
-                        curr_shared_masks.append(curr_mask)
-                        prev_shared_masks.append(prev_mask)
-                        reusable_masks.append(reusable_mask)
-                        aggregation_masks.append(aggregation_mask)
-
-                    # Stack masks: [num_tasks, B, N]
-                    curr_shared_stacked = torch.stack(curr_shared_masks, dim=0)      # [T, B, N]
-                    reusable_stacked = torch.stack(reusable_masks, dim=0)            # [T, B, N]
-                    aggregation_stacked = torch.stack(aggregation_masks, dim=0)      # [T, B, N]
-
-                    # Count how many tasks have curr_shared for each position
-                    curr_shared_count = curr_shared_stacked.sum(dim=0)  # [B, N]
-
-                    # Count how many tasks are reusable (prev & curr both True) for each position
-                    reusable_count = reusable_stacked.sum(dim=0)  # [B, N]
-
-                    # Count how many tasks need aggregation (prev False, curr True) for each position
-                    aggregation_count = aggregation_stacked.sum(dim=0)  # [B, N]
-
-                    # Collect statistics
-                    total_positions = B * (x.shape[1])  # B * N (number of positions per task)
-                    total_task_tokens = self.num_tasks * total_positions  # T * B * N (total tokens across all tasks)
-                    stats['total_positions'] += total_positions
-                    stats['total_tokens'] += total_task_tokens
-
-                    # Shared gate usage
-                    # Positions: where at least one task uses shared_gate
-                    shared_positions = (curr_shared_count > 0).sum().item()
-                    stats['shared_positions'] += shared_positions
-                    # Tokens: count tokens that use shared_gate across all tasks
-                    shared_task_tokens = curr_shared_stacked.sum().item()
-                    stats['shared_gate_tokens'] += shared_task_tokens
-
-                    # Reusable tokens
-                    # Positions: where at least 2 tasks have prev & curr both True
-                    reusable_positions = (reusable_count >= 2).sum().item()
-                    stats['reusable_positions'] += reusable_positions
-                    # Tokens: count tokens that are actually reused (excluding first computation)
-                    reuse_task_tokens = (reusable_count - 1).clamp(min=0).sum().item()
-                    stats['reusable_tokens'] += reuse_task_tokens
-
-                    # MoE block forward for each task
-                    task_outputs = {}
-                    for task in range(self.num_tasks):
-                        outs[task], imp, load = blk(
-                            outs[task],
-                            gate_inp=gate_inp,
-                            task_id=task,
-                            task_specific_feature=task_specific_feature,
-                            selector_output=current_router_outputs[task]
-                        )
-                        task_outputs[task] = outs[task]
-
-                        # Accumulate cv_loss
-                        if (imp is not None) and (load is not None):
-                            total_cv_loss = total_cv_loss + blk.cv_squared(imp) + blk.cv_squared(load)
-
-                    # Reuse results for skipped positions (prev & curr both True)
-                    # Note: Reuse logic is removed to avoid checkpoint issues
-
-                    # Aggregate results for positions where >=2 tasks have (prev: False, curr: True)
-                    # These positions need aggregation_function to combine results from multiple tasks
-                    aggregation_needed_mask = (aggregation_count >= 2)  # [B, N]: where >=2 tasks need aggregation
-
-                    # Collect aggregation statistics
-                    # Positions: where aggregation is needed (>=2 tasks with prev:False, curr:True)
-                    aggregated_positions = aggregation_needed_mask.sum().item()
-                    stats['aggregated_positions'] += aggregated_positions
-                    # Tokens: count how many task tokens are involved in aggregation
-                    # For each aggregation position, count how many tasks have (prev:False, curr:True)
-                    aggregation_task_count = aggregation_stacked.sum().item()  # Total tasks with prev:False, curr:True
-                    stats['aggregated_tokens'] += aggregation_task_count
-
-                    if aggregation_needed_mask.any():
-                        # Apply aggregation for positions where >=2 tasks have (prev:False, curr:True)
-                        # Only aggregate the specific tasks that have (prev:False, curr:True)
-                        aggregated = self.aggregation(
-                            task_outputs,
-                            aggregation_masks,  # Use aggregation_masks instead of curr_shared_masks
-                            aggregation_needed_mask
-                        )
-
-                        if aggregated is not None:
-                            # Update outputs for tasks that need aggregation at aggregation positions
-                            for task in range(self.num_tasks):
-                                update_mask = aggregation_needed_mask & aggregation_masks[task]
-                                if update_mask.any():
-                                    m = update_mask.unsqueeze(-1)
-                                    outs[task] = torch.where(m, aggregated, outs[task])
-
-                # Update prev_router_outputs for next iteration
-                prev_router_outputs = [curr.clone() for curr in current_router_outputs]
-
-            else:
-                # Non-MoE block: each task processes independently
-                for task in range(self.num_tasks):
-                    outs[task], _, _ = blk(outs[task])
+            # Update state: current state becomes prev for next block
+            # Only MoE blocks produce curr_state; NonMoE blocks return None
+            if curr_state is not None:
+                prev_state = curr_state
 
         # Calculate statistics ratios
-        # Token-based ratios
-        if stats['total_tokens'] > 0:
-            stats['reuse_ratio'] = stats['reusable_tokens'] / stats['total_tokens']
-            stats['aggregation_ratio'] = stats['aggregated_tokens'] / stats['total_tokens']
-            stats['shared_gate_ratio'] = stats['shared_gate_tokens'] / stats['total_tokens']
-        else:
-            stats['reuse_ratio'] = 0.0
-            stats['aggregation_ratio'] = 0.0
-            stats['shared_gate_ratio'] = 0.0
-
-        # Position-based ratios
         if stats['total_positions'] > 0:
-            stats['reuse_position_ratio'] = stats['reusable_positions'] / stats['total_positions']
-            stats['aggregation_position_ratio'] = stats['aggregated_positions'] / stats['total_positions']
-            stats['shared_position_ratio'] = stats['shared_positions'] / stats['total_positions']
+            stats['attn_aggregation_ratio'] = stats['aggregated_positions_attn'] / stats['total_positions']
+            stats['mlp_aggregation_ratio'] = stats['aggregated_positions_mlp'] / stats['total_positions']
+            stats['shared_prev_ratio'] = stats['shared_positions_prev'] / stats['total_positions']
+            stats['shared_curr_ratio'] = stats['shared_positions_curr'] / stats['total_positions']
         else:
-            stats['reuse_position_ratio'] = 0.0
-            stats['aggregation_position_ratio'] = 0.0
-            stats['shared_position_ratio'] = 0.0
+            stats['attn_aggregation_ratio'] = 0.0
+            stats['mlp_aggregation_ratio'] = 0.0
+            stats['shared_prev_ratio'] = 0.0
+            stats['shared_curr_ratio'] = 0.0
 
         # Log MoE stats to wandb if available (only during training)
-        if self.training and stats['total_tokens'] > 0 and self.wandb_logger is not None:
+        if self.training and stats['total_positions'] > 0 and self.wandb_logger is not None:
             logger = self.wandb_logger()
             if logger is not None:
                 logger.log_moe_stats(stats)
