@@ -21,7 +21,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .gates import NoisyGate_VMoE as Custom_VMoE
 from models.moe import TaskMoE
-from models.router_state import RouterState, selector_to_bits, popcount_bits, bits_to_task_masks, bits_to_multihot
+from models.router_state import RouterState, selector_to_bits, popcount_bits, bits_to_task_masks, bits_to_multihot, compute_masks
 from models.aggregation_stages import AggregationStage
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
@@ -384,7 +384,7 @@ class Block(nn.Module):
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
                  moe=False, moe_mlp_ratio=1., moe_experts=8,
                  moe_top_k=4, moe_gate_dim=-1, world_size=2,
-                 moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False,
+                 moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=64, multi_gate=False,
                  num_experts_pertask = -1, num_tasks = -1,
                  gate_input_ahead = False):
         super().__init__()
@@ -434,16 +434,13 @@ class Block(nn.Module):
             # Gate input dimension
             # - shared gate: always uses task embedding (multi-hot)
             # - task-specific gate: uses task embedding only if single gate (not multi_gate)
-            if gate_task_specific_dim < 0:
-                d_gate_with_emb = dim
-                d_gate_no_emb = dim
-            else:
-                d_gate_with_emb = dim + gate_task_specific_dim
-                d_gate_no_emb = dim
+            assert gate_task_specific_dim > 0, f"gate_task_specific_dim must be positive, got {gate_task_specific_dim}"
+
+            d_gate_with_emb = dim + gate_task_specific_dim
+            d_gate_no_emb = dim
 
             # RouterSelector - determines shared vs task-specific
-            d_task_emb = gate_task_specific_dim if gate_task_specific_dim > 0 else 0
-            self.router_selector = RouterSelector(d_model=dim, d_task_emb=d_task_emb, temperature=1.0, hard=False)
+            self.router_selector = RouterSelector(d_model=dim, d_task_emb=gate_task_specific_dim, temperature=1.0, hard=False)
 
             # Shared gate - always receives multi-hot task embedding
             self.shared_gate = TokenNoisyGate_VMoE(
@@ -596,7 +593,7 @@ class Block(nn.Module):
         else:
             return self._mlp_dense_inner(x)
 
-    def _mlp_moe_inner(self, x, selector_output, task_id, task_emb, gate_shared_emb):
+    def _mlp_moe_inner(self, x, selector_output, task_id, task_emb, gate_shared_emb, compute_mask=None):
         """Internal checkpointed function: MoE routing + MLP
 
         Args:
@@ -605,27 +602,93 @@ class Block(nn.Module):
             task_id: Task ID for selecting task-specific gate (int)
             task_emb: [E] one-hot task embedding for task-specific gate
             gate_shared_emb: [B, N, E] multi-hot embedding for shared gate
+            compute_mask: [B, N] bool, optional. If provided, only compute these positions.
+                         Used for Phase 2 optimization to skip reusable positions.
 
         Returns:
             output: x + residual [B, N, C]
+            gate_top_k_idx: [B*N, top_k] or [K, top_k] expert indices
+            gate_score: [B*N, top_k] or [K, top_k] expert scores
+            moe_output: [B, N, C] MoE output before residual
+            moe_component: [B, N, C] MoE component after drop_path (for caching)
             gate_info: dict with gate statistics for cv_loss computation
         """
+        B, N, C = x.shape
+        device = x.device
         normed_x = self.norm2(x)
 
-        # Route tokens through gates
-        gate_top_k_idx, gate_score, gate_info = self._route_tokens(
-            normed_x,
-            selector_output=selector_output,
-            task_id=task_id,
-            task_emb=task_emb,
-            gate_shared_emb=gate_shared_emb
-        )
+        if compute_mask is not None:
+            # Phase 2: compute_mask 제공됨 - masked computation mode
+            compute_flat = compute_mask.flatten()  # [B*N]
 
-        # MoE forward
-        moe_output = self.mlp(normed_x, gate_top_k_idx, gate_score)
-        output = x + self.drop_path(self.mlp_drop(moe_output))
+            if not compute_flat.any():
+                # Case: compute_mask가 모두 False (계산할 위치 0개)
+                # 이 경우 MoE 계산을 완전히 skip하고 zero output 반환
+                # wrapper에서 cache만 사용하거나 output = x가 되어야 함
+                moe_output = torch.zeros(B, N, C, device=device, dtype=x.dtype)
+                moe_component = torch.zeros(B, N, C, device=device, dtype=x.dtype)
+                output = x + moe_component  # output = x
 
-        return output, gate_info
+                # Empty gate_info (gate routing 없음)
+                gate_info = self._create_empty_gate_info(device)
+
+                # Dummy gate outputs (wrapper에서 사용하지 않음)
+                gate_top_k_idx = torch.zeros(0, self.moe_top_k, dtype=torch.long, device=device)
+                gate_score = torch.zeros(0, self.moe_top_k, device=device)
+
+                return output, gate_top_k_idx, gate_score, moe_output, moe_component, gate_info
+
+            else:
+                # Case: compute_mask에 True가 하나 이상 존재 (scatter/gather)
+                num_compute = compute_flat.sum().item()
+
+                # Gather
+                normed_x_flat = normed_x.reshape(B * N, C)  # [B*N, C]
+                normed_x_compute = normed_x_flat[compute_flat]  # [K, C]
+
+                selector_flat = selector_output.flatten()  # [B*N]
+                selector_compute = selector_flat[compute_flat]  # [K]
+
+                if gate_shared_emb is not None:
+                    gate_shared_emb_flat = gate_shared_emb.reshape(B * N, -1)  # [B*N, E]
+                    gate_shared_emb_compute = gate_shared_emb_flat[compute_flat]  # [K, E]
+                else:
+                    gate_shared_emb_compute = None
+
+                # Route only computed tokens
+                gate_top_k_idx, gate_score, gate_info = self._route_tokens(
+                    normed_x_compute,
+                    selector_output=selector_compute,
+                    task_id=task_id,
+                    task_emb=task_emb,
+                    gate_shared_emb=gate_shared_emb_compute
+                )
+
+                # MoE forward on computed tokens
+                moe_output_compute = self.mlp(normed_x_compute, gate_top_k_idx, gate_score)  # [K, C]
+
+                # Scatter back to full shape
+                moe_output = torch.zeros(B, N, C, device=device, dtype=x.dtype)
+                moe_output.reshape(B * N, C)[compute_flat] = moe_output_compute
+
+                moe_component = self.drop_path(self.mlp_drop(moe_output))
+                output = x + moe_component
+
+        else:
+            # Phase 1 or no masking: Compute all positions
+            gate_top_k_idx, gate_score, gate_info = self._route_tokens(
+                normed_x,
+                selector_output=selector_output,
+                task_id=task_id,
+                task_emb=task_emb,
+                gate_shared_emb=gate_shared_emb
+            )
+
+            moe_output = self.mlp(normed_x, gate_top_k_idx, gate_score)
+            moe_component = self.drop_path(self.mlp_drop(moe_output))
+            output = x + moe_component
+
+        return output, gate_top_k_idx, gate_score, moe_output, moe_component, gate_info
 
     def _forward_mlp_moe(self, x, selector_output, task_id, task_emb, gate_shared_emb):
         """
@@ -643,53 +706,236 @@ class Block(nn.Module):
             gate_info: dict for cv_loss computation
         """
         if self.training:
-            return checkpoint(
+            output, gate_idx, gate_score, moe_out, moe_component, gate_info = checkpoint(
                 self._mlp_moe_inner,
                 x, selector_output, task_id, task_emb, gate_shared_emb,
                 use_reentrant=False
             )
         else:
-            return self._mlp_moe_inner(x, selector_output, task_id, task_emb, gate_shared_emb)
+            output, gate_idx, gate_score, moe_out, moe_component, gate_info = self._mlp_moe_inner(
+                x, selector_output, task_id, task_emb, gate_shared_emb
+            )
+
+        # Keep external API unchanged (only return output and gate_info)
+        return output, gate_info
+
+    def _forward_mlp_moe_with_cache(
+        self, x, selector_output, task_id, task_emb, gate_shared_emb,
+        cached_moe_component, cached_valid_mask,
+        can_reuse_mask, cache_fill_mask
+    ):
+        """
+        Cache-aware MoE forward with computation reuse.
+
+        Strategy (revised to separate compute_mask from cache_fill_mask):
+        - can_reuse_mask: positions where this task can copy from cache
+        - cache_fill_mask: positions where this task computes and populates cache (reuse intersection only)
+        - compute_mask: ALL positions that need MoE computation (built internally)
+          = task_specific | (task_shared & ~can_reuse_mask)
+          This ensures shared positions outside reuse intersection are also computed
+
+        Case 1 (No caching):
+            - can_reuse_mask=None: 재사용 시나리오가 아님
+            - 정상적인 MoE forward 수행
+
+        Case 2 (Full reuse):
+            - can_reuse_mask.all() == True (모든 위치가 cache에서 복사됨)
+            - cache_fill_mask is empty (채울 게 없음)
+            - task-specific 위치가 없음
+            - gate routing skip, expert computation skip
+            - empty gate_info 반환 (cv_loss 중복 방지)
+
+        Case 3 (Partial reuse):
+            - can_reuse_mask와 cache_fill_mask 모두 존재
+            - compute_mask = task_specific | (task_shared & ~can_reuse_mask)
+              (재사용 교집합 밖 shared 위치도 포함됨)
+            - can_reuse_mask 위치: cache에서 복사
+            - cache_fill_mask 위치: 계산 후 cache에 저장 (재사용 교집합에만 제한)
+
+        Checkpoint Safety:
+            - Cache populate는 checkpoint 외부에서 수행
+            - Backward 시 재실행되어도 side-effect 없음
+            - No .detach() - gradient flow preserved
+
+        Args:
+            x: [B, N, C] input tensor
+            selector_output: [B, N] router selector output
+            task_id: int, task ID
+            task_emb: [E] task embedding
+            gate_shared_emb: [B, N, E] shared gate embedding
+            cached_moe_component: [B, N, C] cached MoE component after drop_path (functional update)
+            cached_valid_mask: [B, N] bool, cache validity (mutable, in-place update)
+            can_reuse_mask: [B, N] bool, where to reuse cache
+            cache_fill_mask: [B, N] bool, where to compute and populate cache (reuse intersection only)
+
+        Returns:
+            output: [B, N, C] MoE output
+            gate_info: dict with gate statistics
+            compute_positions: [B, N] bool, positions where actual computation happened
+            cached_moe_component: [B, N, C] updated cache (functional update, preserves gradient)
+        """
+        B, N, C = x.shape
+        device = x.device
+
+        # ===== Case 1: No caching - standard forward =====
+        if can_reuse_mask is None:
+            output, gate_info = self._forward_mlp_moe(x, selector_output, task_id, task_emb, gate_shared_emb)
+            # 재사용 없음: 모든 위치에서 계산 수행
+            compute_positions = torch.ones(B, N, dtype=torch.bool, device=device)
+            # No cache update needed
+            return output, gate_info, compute_positions, cached_moe_component
+
+        # ===== Case 2: Full reuse (all shared positions cached, no task-specific) =====
+        # Full reuse 조건:
+        # 1. can_reuse_mask가 모든 위치를 커버함 (전체 위치에서 cache 사용)
+        # 2. cache_fill_mask가 empty (채울 게 없음)
+        # 3. task-specific 위치가 없음 (selector_output <= 0.5인 위치는 task-specific)
+        # 4. CRITICAL: can_reuse_mask.all()로 전체 커버 여부 확인 (안전성 보장)
+        task_specific_mask = (selector_output <= 0.5)  # [B, N]
+
+        # Full reuse 안전성 체크:
+        # - cache_fill_mask가 empty이고 (채울 게 없음)
+        # - task_specific 위치가 없고 (모든 위치가 shared)
+        # - can_reuse_mask가 전체를 커버함 (모든 위치에서 cache 사용)
+        # 이 조건들이 모두 만족되어야 cached_moe_component를 전체에 적용 가능
+        if ((cache_fill_mask is None or not cache_fill_mask.any()) and
+            not task_specific_mask.any() and
+            can_reuse_mask is not None and can_reuse_mask.all()):
+            # 이 task는 모든 위치에서 shared를 사용하고, 전부 이미 캐시되어 있음
+            # Gate routing 및 expert computation 완전히 skip
+
+            # Cache에서 MoE component 가져와서 residual 구성
+            output = x + cached_moe_component
+
+            # Empty gate_info 반환 (이 task는 gate decision을 하지 않음)
+            # → cv_loss 계산 시 이 task의 기여도가 0이 됨 (중복 카운팅 방지)
+            gate_info = self._create_empty_gate_info(device)
+
+            # Full reuse: 계산한 위치 없음
+            compute_positions = torch.zeros(B, N, dtype=torch.bool, device=device)
+            # No cache update needed (all from cache)
+            return output, gate_info, compute_positions, cached_moe_component
+
+        # ===== Case 3: Partial reuse - compute some, reuse some =====
+        # cache_fill_mask 위치: 이 task가 대표로 계산 수행 후 cache에 저장 (재사용 교집합에만 제한)
+        # can_reuse_mask 위치: 이전 task의 결과 재사용
+        # task_specific 위치: 정상 계산
+        # shared-non-reuse 위치: shared이지만 재사용 교집합 밖 (정상 계산, cache에는 저장 안 함)
+
+        # Step 1: Compute mask = ALL positions that need actual MoE computation
+        # ✅ CRITICAL FIX: 재사용 교집합 밖 shared 위치도 포함되어야 함
+        # compute_mask = task_specific | (task_shared & ~can_reuse_mask)
+        task_specific = (selector_output <= 0.5)  # [B, N]
+        task_shared = (selector_output > 0.5)  # [B, N]
+
+        # Positions that don't use cache (either task-specific or shared-but-not-reusing)
+        compute_positions = task_specific.clone()  # Start with task-specific
+        if can_reuse_mask is not None:
+            # Add shared positions that are NOT being reused
+            compute_positions = compute_positions | (task_shared & ~can_reuse_mask)
+        else:
+            # No reuse at all: all shared positions need computation
+            compute_positions = compute_positions | task_shared
+
+        # Step 2: MoE computation (on compute_positions)
+        # checkpoint 내부: 순수 계산만 (side-effect 없음)
+        if self.training:
+            output, gate_idx, gate_score, moe_out, moe_component, gate_info = checkpoint(
+                self._mlp_moe_inner,
+                x, selector_output, task_id, task_emb, gate_shared_emb, compute_positions,
+                use_reentrant=False
+            )
+        else:
+            output, gate_idx, gate_score, moe_out, moe_component, gate_info = self._mlp_moe_inner(
+                x, selector_output, task_id, task_emb, gate_shared_emb, compute_positions
+            )
+
+        # Step 3: Cache populate (gradient flow 유지)
+        # cache_fill_mask 위치만 cache에 저장 (재사용 교집합에만 제한)
+        # detach하지 않음 → gradient가 cache를 통해 MoE 파라미터로 전달됨
+        if cache_fill_mask is not None and cache_fill_mask.any():
+            # In-place update는 bool mask에만 허용 (gradient 무관)
+            cached_valid_mask[cache_fill_mask] = True
+
+            # moe_component는 in-place 대신 functional update
+            # 이렇게 하면 cached_moe_component가 계산 그래프에 포함되어
+            # 재사용 task의 gradient가 대표 task의 MoE 파라미터로 전달됨
+            #
+            # Memory Trade-off:
+            # torch.where 체인이 task마다 쌓여서 num_tasks 큰 경우 그래프 길어질 수 있음
+            # 이는 gradient flow를 위한 의도된 설계이지만,
+            # 메모리 예산이 빡빡하면 accumulate buffer + single write 방식 고려 필요
+            cached_moe_component = torch.where(
+                cache_fill_mask.unsqueeze(-1),  # [B, N, 1]
+                moe_component,  # 새로 계산된 값 (gradient 있음)
+                cached_moe_component  # 기존 값 유지
+            )
+
+        # Step 4: Reuse 위치에서 cached component 사용 (functional merge)
+        # In-place update 대신 torch.where 사용 → autograd 안정성 보장
+        if can_reuse_mask is not None and can_reuse_mask.any():
+            output = torch.where(
+                can_reuse_mask.unsqueeze(-1),  # [B, N, 1]
+                x + cached_moe_component,  # Cached component 사용 (gradient 흐름)
+                output  # 정상 계산 결과 유지
+            )
+
+        # gate_info는 compute_positions에 대한 정보만 담고 있음
+        # Block.forward()에서 그대로 사용 (필터링 불필요)
+        # compute_positions = task_specific | (task_shared & ~can_reuse_mask)
+        # cached_moe_component 반환 (functional update된 버전, gradient 유지)
+        return output, gate_info, compute_positions, cached_moe_component
 
     def _route_tokens(self, x, selector_output, task_id, task_emb, gate_shared_emb):
         """
         Route tokens through appropriate gates based on selector output.
 
         Args:
-            x: Input tensor [B, N, D] (after LN2)
-            selector_output: [B, N] router selector output
+            x: Input tensor [B, N, D] (dense) or [K, D] (masked)
+            selector_output: [B, N] (dense) or [K] (masked) router selector output
             task_id: Task ID for selecting task-specific gate (int)
             task_emb: [E] one-hot task embedding for task-specific gate
-            gate_shared_emb: [B, N, E] multi-hot embedding for shared gate
+            gate_shared_emb: [B, N, E] (dense) or [K, E] (masked) multi-hot embedding for shared gate
 
         Returns:
-            gate_top_k_idx: [B*N, top_k] expert indices
-            gate_score: [B*N, top_k] expert scores
+            gate_top_k_idx: [B*N, top_k] or [K, top_k] expert indices
+            gate_score: [B*N, top_k] or [K, top_k] expert scores
             gate_info: dict with clean_logits, noisy_logits, noise_stddev, top_logits, gates
         """
-        B, N, D = x.shape
         device = x.device
-        B_N = B * N
 
-        # Flatten x to [B*N, D]
-        x_flat = x.reshape(B_N, D)
+        # Handle both dense [B, N, D] and masked [K, D] inputs
+        if x.dim() == 3:
+            # Dense mode: [B, N, D]
+            B, N, D = x.shape
+            B_N = B * N
+            x_flat = x.reshape(B_N, D)
+            selector_flat = selector_output.reshape(-1)
+            if gate_shared_emb is not None:
+                shared_emb_flat = gate_shared_emb.reshape(B_N, -1)
+            else:
+                shared_emb_flat = None
+        elif x.dim() == 2:
+            # Masked mode: [K, D]
+            K, D = x.shape
+            B_N = K
+            x_flat = x  # Already flat
+            selector_flat = selector_output  # Already flat [K]
+            shared_emb_flat = gate_shared_emb  # Already flat [K, E] or None
+        else:
+            raise ValueError(f"Expected x to be 2D or 3D, got {x.dim()}D")
 
-        # Flatten selector_output to [B*N]
-        selector_flat = selector_output.reshape(-1)
+        # Flatten x to [B*N, D] or use [K, D] directly
+        # (x_flat already set above)
 
         # Create masks
         shared_mask = (selector_flat > 0.5)
         task_mask = (selector_flat <= 0.5)
 
-        # Prepare task embedding flat: [E] -> [B*N, E]
+        # Prepare task embedding flat: [E] -> [B*N, E] or [K, E]
         task_emb_flat = None
         if task_emb is not None:
             task_emb_flat = task_emb.unsqueeze(0).expand(B_N, -1)
-
-        # Prepare shared embedding flat: [B, N, E] -> [B*N, E]
-        shared_emb_flat = None
-        if gate_shared_emb is not None:
-            shared_emb_flat = gate_shared_emb.reshape(B_N, -1)
 
         # Initialize output tensors
         gate_top_k_idx = torch.zeros(B_N, self.moe_top_k, dtype=torch.long, device=device)
@@ -705,8 +951,15 @@ class Block(nn.Module):
         # Route shared tokens through shared_gate
         if shared_mask.any():
             shared_inp = x_flat[shared_mask]
-            if shared_emb_flat is not None:
-                shared_inp = torch.cat([shared_inp, shared_emb_flat[shared_mask]], dim=-1)
+            # CRITICAL: shared_emb_flat must exist when routing shared tokens
+            # self.shared_gate expects input dim = d_gate_with_emb = dim + gate_task_specific_dim
+            # Without embedding concat, input would be dim (shape mismatch)
+            assert shared_emb_flat is not None, (
+                "shared_emb_flat is None but shared tokens exist. "
+                "This indicates gate_shared_emb was not generated in Block.forward(). "
+                "Ensure gate_task_represent is provided when gate_task_specific_dim > 0."
+            )
+            shared_inp = torch.cat([shared_inp, shared_emb_flat[shared_mask]], dim=-1)
             (s_idx, s_score), s_clean, s_noisy, s_noise_std, s_top, s_gates = self.shared_gate(shared_inp)
             gate_top_k_idx[shared_mask] = s_idx
             gate_score[shared_mask] = s_score
@@ -771,18 +1024,68 @@ class Block(nn.Module):
 
         return self.cv_squared(importance) + self.cv_squared(load)
 
-    def _build_router_state(self, selector_tbN: torch.Tensor) -> RouterState:
+    def _create_empty_gate_info(self, device):
+        """
+        Create empty gate_info dict for when no computation happened.
+
+        Used in full reuse case where all positions are cached.
+
+        Args:
+            device: torch device
+
+        Returns:
+            gate_info: dict with empty tensors
+        """
+        return {
+            'clean_logits': torch.empty(0, self.tot_expert, device=device),
+            'noisy_logits': torch.empty(0, self.tot_expert, device=device),
+            'noise_stddev': torch.empty(0, self.tot_expert, device=device),
+            'top_logits': torch.empty(0, self.moe_top_k + 1, device=device),
+            'gates': torch.empty(0, self.tot_expert, device=device),
+        }
+
+    def _filter_gate_info_by_mask(self, gate_info, mask_2d):
+        """
+        Filter gate_info to only include positions where mask is True.
+
+        Used to exclude reusable positions from cv_loss computation for
+        subsequent tasks (avoid double-counting).
+
+        Args:
+            gate_info: dict with [B*N, ...] tensors
+            mask_2d: [B, N] bool, True for positions to keep
+
+        Returns:
+            filtered_gate_info: dict with [K, ...] tensors where K = mask.sum()
+        """
+        mask_flat = mask_2d.flatten()
+
+        if not mask_flat.any():
+            return self._create_empty_gate_info(mask_2d.device)
+
+        filtered = {}
+        for key, tensor in gate_info.items():
+            filtered[key] = tensor[mask_flat]
+
+        return filtered
+
+    def _build_router_state(self, selector_tbN: torch.Tensor, reuse_bits=None) -> RouterState:
         """
         Build RouterState from selector outputs.
 
         Args:
             selector_tbN: [T, B, N] selector outputs
+            reuse_bits: [B, N] int64, optional. Reuse bitmask for next block.
 
         Returns:
-            RouterState with shared_bits [B, N] and optional shared_selector
+            RouterState with shared_bits, optional shared_selector, and optional reuse_bits
         """
         bits = selector_to_bits(selector_tbN, thr=0.5)  # [B, N] int64
-        return RouterState(shared_bits=bits, shared_selector=selector_tbN.detach())
+        return RouterState(
+            shared_bits=bits,
+            shared_selector=selector_tbN.detach(),
+            reuse_bits=reuse_bits
+        )
 
     def forward(self, outs: dict, prev_state: RouterState | None,
                 gate_inp=None, task_emb_T_E=None, gate_task_represent=None):
@@ -851,48 +1154,163 @@ class Block(nn.Module):
         # (4) Compute selector AFTER aggregation (outside checkpoint)
         #     Selector is computed on post-aggregation representation
         #     Pass task_emb_T_E[task] (one-hot based embedding) to selector
-        curr_selector = []
-        for task in range(self.num_tasks):
-            task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
-            curr_selector.append(self.router_selector(outs[task], task_emb=task_emb))  # [B, N]
-        curr_selector_tbN = torch.stack(curr_selector, dim=0)  # [T, B, N]
-
-        # (5) First MoE block handling: force selector to 0 (task-specific only)
         is_first_moe = (prev_state is None)
-        if is_first_moe:
-            curr_selector_tbN = torch.zeros_like(curr_selector_tbN)
-            curr_selector = [curr_selector_tbN[t] for t in range(self.num_tasks)]
 
-        # (6) Build current state from current selector (need curr_bits for shared gate embedding)
-        curr_state = self._build_router_state(curr_selector_tbN)
-        curr_bits = curr_state.shared_bits
+        if is_first_moe:
+            # (4a) First MoE block: force selector to 0 (task-specific only, no shared gate)
+            curr_selector_tbN = torch.zeros(self.num_tasks, B, N, device=outs[0].device)
+            curr_selector = [curr_selector_tbN[t] for t in range(self.num_tasks)]
+        else:
+            # (4b) Subsequent MoE blocks: compute selector normally
+            curr_selector = []
+            for task in range(self.num_tasks):
+                task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
+                curr_selector.append(self.router_selector(outs[task], task_emb=task_emb))  # [B, N]
+            curr_selector_tbN = torch.stack(curr_selector, dim=0)  # [T, B, N]
+
+        # (5) Build current state from current selector (need curr_bits for shared gate embedding)
+        # Note: reuse_bits will be added later after detection
+        curr_bits = selector_to_bits(curr_selector_tbN, thr=0.5)
         curr_count = popcount_bits(curr_bits, self.num_tasks)
 
-        # (7) Create shared gate embedding from multi-hot (if gate_task_represent available)
-        #     This embedding is used by MoE gate for tokens routed to shared_gate
-        gate_shared_emb = None
-        if gate_task_represent is not None:
-            mh = bits_to_multihot(curr_bits, self.num_tasks)  # [B, N, T]
-            gate_shared_emb = gate_task_represent(mh)  # [B, N, E]
+        # ===== Reuse detection and cache initialization =====
+        # 목적: Post-attention aggregation 이후 동일해진 토큰 위치에서 MoE 중복 연산 제거
+        #
+        # 핵심 아이디어:
+        # 1. 이전 블록에서 shared였던 task들이 aggregation으로 동일한 representation을 갖게 됨
+        # 2. 현재 블록에서도 shared를 선택한 task들은 동일한 MoE 입력을 받음
+        # 3. 따라서 이 교집합에 속한 task들은 동일한 gate routing과 expert output을 갖게 됨
+        # 4. 첫 번째 task가 계산하고 cache에 저장, 나머지 task들은 복사만 수행
+        #
+        # 재사용 가능 조건:
+        # - prev_bits: 이전 블록에서 shared gate를 선택한 task 집합 (prev_state.shared_bits)
+        # - curr_bits: 현재 블록에서 shared gate를 선택한 task 집합
+        # - reuse_bits = prev_bits & curr_bits (교집합)
+        # - reuse_possible_mask = popcount(reuse_bits) >= 2 (2개 이상 task가 공유)
 
-        # (8) MoE MLP for all tasks
-        #     Gate routing and MoE are done together inside _forward_mlp_moe
+        reuse_bits = None                # [B, N] int64 bitmask - 재사용 가능한 task 집합
+        reuse_possible_mask = None       # [B, N] bool - 재사용 가능한 위치
+
+        # Tensor caches (forward pass 내에서만 유지되는 로컬 캐시)
+        # 목적: dict 대신 텐서를 사용하여 Python overhead 제거
+        cached_moe_component = None      # [B, N, C] - 캐시된 MoE component (drop_path 적용 후)
+        cached_valid_mask = None         # [B, N] bool - 해당 위치의 cache가 채워졌는지 여부
+
+        if not is_first_moe:
+            # 두 번째 MoE 블록부터는 reuse detection 수행
+            # prev_state.shared_bits: 이전 블록에서 aggregation이 발생한 task 집합
+            prev_bits = prev_state.shared_bits
+
+            # compute_masks: prev_bits와 curr_bits의 교집합(reuse_bits)과
+            # 재사용 가능한 위치(reuse_possible_mask)를 계산
+            agg_needed, reuse_possible_mask, reuse_bits = compute_masks(
+                prev_bits, curr_bits, self.num_tasks
+            )
+
+            # 재사용 가능한 위치가 있다면 tensor cache 초기화
+            if reuse_possible_mask.any():
+                B, N = reuse_possible_mask.shape
+                device = outs[0].device
+                C = outs[0].shape[-1]
+
+                # 모든 위치에 대해 캐시 공간 할당
+                # (실제로는 reuse_possible_mask가 True인 위치만 사용됨)
+                # dtype 명시: fp16/bf16 학습 시 혼합 dtype 문제 방지
+                cached_moe_component = torch.zeros(B, N, C, dtype=outs[0].dtype, device=device)
+                cached_valid_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        # ===== END Reuse detection =====
+
+        # (6) Create shared gate embedding from multi-hot
+        #     CRITICAL: gate_shared_emb는 항상 생성되어야 함
+        #     이유: gate_task_specific_dim > 0로 고정했고, d_gate_with_emb = dim + gate_task_specific_dim이므로
+        #     self.shared_gate는 항상 dim+64 차원 입력을 기대함
+        #     gate_task_represent가 None이면 런타임 shape mismatch 발생
+        assert gate_task_represent is not None, (
+            "gate_task_represent must not be None when gate_task_specific_dim > 0. "
+            "Shared gate expects input dimension dim+gate_task_specific_dim but would receive dim."
+        )
+        mh = bits_to_multihot(curr_bits, self.num_tasks)  # [B, N, T]
+        gate_shared_emb = gate_task_represent(mh)  # [B, N, E]
+
+        # (7) MoE MLP for all tasks WITH CACHE REUSE
+        #     동적 대표 선택(dynamic representative selection) 전략:
+        #     - 재사용 가능한 위치마다 "가장 먼저 도달한 shared task"가 대표가 됨
+        #     - 대표 task: gate routing + expert computation 수행하고 cache에 저장
+        #     - 이후 shared task들: cache에서 결과를 복사만 수행 (gate routing skip)
+        #
+        #     3가지 경우 처리:
+        #     1. 재사용 없음 (can_reuse_mask=None): 정상 MoE 수행
+        #     2. 전체 재사용 (need_compute_mask가 empty): cache에서 전부 복사
+        #     3. 부분 재사용: 일부는 계산하고 cache 채우기, 일부는 복사
         for task in range(self.num_tasks):
             task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
 
-            # MoE forward (includes LN2, gate routing, MoE, residual)
-            outs[task], gate_info = self._forward_mlp_moe(
+            # ===== Step 1: 이 task가 재사용 가능한 위치 확인 =====
+            can_reuse_mask = None  # [B, N] bool - 이 task가 cache를 복사할 수 있는 위치
+            cache_fill_mask = None  # [B, N] bool - 이 task가 계산 후 cache에 저장할 위치
+
+            # 재사용 경로 진입 조건:
+            # 1. reuse_bits가 존재하고
+            # 2. cache 텐서들이 실제로 초기화되었어야 함 (cached_valid_mask is not None)
+            # 이 가드가 없으면 reuse_possible_mask.any()=False인데 task_in_reuse.any()=True일 때 크래시
+            if reuse_bits is not None and cached_valid_mask is not None:
+                # reuse_bits에서 현재 task의 bit 추출
+                # (이 task가 재사용 가능한 task 집합에 포함되는 위치)
+                task_in_reuse = ((reuse_bits >> task) & 1).bool()  # [B, N]
+
+                # 이 task가 재사용 가능한 위치가 실제로 하나라도 존재할 때만
+                # cache-aware forward로 진입
+                if task_in_reuse.any():
+                    # Cache가 이미 채워진 위치에서만 재사용 가능
+                    # (이전 task가 이미 계산을 완료한 위치)
+                    can_reuse_mask = task_in_reuse & cached_valid_mask
+
+                    # ===== Step 2: Cache 채우기 위치 결정 (cache_fill_mask) =====
+                    # Cache에 저장할 위치: 재사용 교집합 내에서 shared이고 아직 cache 없는 위치만
+                    # 1) reuse 대상 위치여야 하고 (task_in_reuse)
+                    # 2) shared gate를 선택했고 (task_shared)
+                    # 3) 아직 cache가 없는 위치 (이 task가 대표가 됨)
+                    #
+                    # task_in_reuse로 제한하지 않으면, reuse 교집합이 아닌 shared 위치까지
+                    # 불필요하게 cache에 채워져서 메모리/성능 낭비 발생
+                    task_shared = (curr_selector[task] > 0.5)  # [B, N]
+                    cache_fill_mask = task_in_reuse & task_shared & ~cached_valid_mask
+
+            # ===== Step 3: Cache-aware MoE 수행 =====
+            # _forward_mlp_moe_with_cache가 다음을 처리:
+            # - can_reuse_mask 위치: cache에서 복사 (gate routing skip)
+            # - cache_fill_mask 위치: 계산 후 cache에 저장 (대표 task 역할)
+            # - 나머지 위치: 정상적인 task-specific MoE 수행
+            #
+            # cached_moe_component를 받아서 다시 업데이트:
+            # functional update로 gradient flow 유지하면서 task 간 공유
+            outs[task], gate_info, compute_positions, cached_moe_component = self._forward_mlp_moe_with_cache(
                 outs[task],
                 selector_output=curr_selector[task],
                 task_id=task,
                 task_emb=task_emb,
-                gate_shared_emb=gate_shared_emb
+                gate_shared_emb=gate_shared_emb,
+                # Cache references
+                # cached_valid_mask은 mutable (bool, gradient 무관)
+                # cached_moe_component는 functional update 후 반환받아서 재전달
+                cached_moe_component=cached_moe_component,
+                cached_valid_mask=cached_valid_mask,
+                # Masks
+                can_reuse_mask=can_reuse_mask,
+                cache_fill_mask=cache_fill_mask
             )
 
-            # Accumulate cv_loss from gate_info
+            # ===== Step 4: cv_loss 계산 (중복 방지) =====
+            # gate_info는 _forward_mlp_moe_with_cache가 이미 올바르게 준비함:
+            # - No caching: 모든 위치 포함 (dense)
+            # - Full reuse: empty (cv_loss 기여 0)
+            # - Partial reuse: 실제 계산한 위치만 포함 (sparse, compute_positions에 해당)
+            #
+            # 따라서 gate_info를 필터링하지 않고 그대로 사용하면 됨
+            # (필터링하면 sparse gate_info에서 shape mismatch 발생)
             aux['cv_loss'] = aux['cv_loss'] + self._compute_cv_loss(gate_info)
 
-        # (9) MLP-post aggregation (using curr_state)
+        # (8) MLP-post aggregation (using curr_bits)
         if self.mlp_post_aggr is not None:
             mlp_agg_needed = (curr_count >= 2)  # [B, N]
             curr_task_masks = bits_to_task_masks(curr_bits, self.num_tasks)
@@ -901,6 +1319,10 @@ class Block(nn.Module):
             # Stats
             aux['stats']['shared_positions_curr'] = (curr_count > 0).sum().item()
             aux['stats']['aggregated_positions_mlp'] = mlp_agg_needed.sum().item()
+
+        # (9) Build curr_state with curr_bits for next block
+        # curr_bits를 reuse_bits로 전달: 다음 블록에서 prev_state.shared_bits로 사용됨
+        curr_state = self._build_router_state(curr_selector_tbN, reuse_bits=curr_bits)
 
         return outs, curr_state, aux
 

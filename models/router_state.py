@@ -26,9 +26,14 @@ class RouterState:
                      selector_output > 0.5
         shared_selector: [T, B, N] float, optional. The raw selector outputs
                         for soft aggregation or debugging
+        reuse_bits: [B, N] int64 bitmask, optional. Bitmask for next block
+                    indicating which tasks can potentially reuse computation.
+                    This is curr_bits from current block, passed to next block
+                    where it becomes prev_bits for reuse detection.
     """
     shared_bits: torch.Tensor  # [B, N] int64 bitmask
     shared_selector: torch.Tensor | None = None  # [T, B, N] float
+    reuse_bits: torch.Tensor | None = None  # [B, N] int64 - for next block
 
 
 def selector_to_bits(selector_tbN: torch.Tensor, thr: float = 0.5) -> torch.Tensor:
