@@ -804,6 +804,12 @@ class Block(nn.Module):
             # 이 task는 모든 위치에서 shared를 사용하고, 전부 이미 캐시되어 있음
             # Gate routing 및 expert computation 완전히 skip
 
+            # Safety: Ensure cache is actually populated
+            assert cached_moe_component is not None, (
+                "Full reuse condition met but cached_moe_component is None. "
+                "This indicates a logic error in cache initialization."
+            )
+
             # Cache에서 MoE component 가져와서 residual 구성
             output = x + cached_moe_component
 
@@ -1069,22 +1075,22 @@ class Block(nn.Module):
 
         return filtered
 
-    def _build_router_state(self, selector_tbN: torch.Tensor, reuse_bits=None) -> RouterState:
+    def _build_router_state(self, selector_tbN: torch.Tensor) -> RouterState:
         """
         Build RouterState from selector outputs.
 
         Args:
             selector_tbN: [T, B, N] selector outputs
-            reuse_bits: [B, N] int64, optional. Reuse bitmask for next block.
 
         Returns:
-            RouterState with shared_bits, optional shared_selector, and optional reuse_bits
+            RouterState with shared_bits and shared_selector.
+            The shared_bits will be used by the next block as prev_state.shared_bits
+            for post-attention aggregation and reuse detection.
         """
         bits = selector_to_bits(selector_tbN, thr=0.5)  # [B, N] int64
         return RouterState(
             shared_bits=bits,
-            shared_selector=selector_tbN.detach(),
-            reuse_bits=reuse_bits
+            shared_selector=selector_tbN.detach()
         )
 
     def forward(self, outs: dict, prev_state: RouterState | None,
@@ -1232,6 +1238,12 @@ class Block(nn.Module):
         mh = bits_to_multihot(curr_bits, self.num_tasks)  # [B, N, T]
         gate_shared_emb = gate_task_represent(mh)  # [B, N, E]
 
+        # Ensure gate_shared_emb has correct dimension
+        assert gate_shared_emb.shape[-1] == self.gate_task_specific_dim, (
+            f"gate_shared_emb dimension mismatch: expected {self.gate_task_specific_dim}, "
+            f"got {gate_shared_emb.shape[-1]}. Check gate_task_represent output dimension."
+        )
+
         # (7) MoE MLP for all tasks WITH CACHE REUSE
         #     동적 대표 선택(dynamic representative selection) 전략:
         #     - 재사용 가능한 위치마다 "가장 먼저 도달한 shared task"가 대표가 됨
@@ -1242,6 +1254,18 @@ class Block(nn.Module):
         #     1. 재사용 없음 (can_reuse_mask=None): 정상 MoE 수행
         #     2. 전체 재사용 (need_compute_mask가 empty): cache에서 전부 복사
         #     3. 부분 재사용: 일부는 계산하고 cache 채우기, 일부는 복사
+        # In single-gate mode (multi_gate=False), task_emb is required for routing
+        # RouterSelector was initialized with d_task_emb=64, so task_emb must have dim 64
+        if not self.multi_gate:
+            assert task_emb_T_E is not None, (
+                "task_emb_T_E must not be None in single-gate mode (multi_gate=False). "
+                "_route_tokens expects task_emb for routing."
+            )
+            assert task_emb_T_E.shape[-1] == self.gate_task_specific_dim, (
+                f"task_emb_T_E dimension mismatch: expected {self.gate_task_specific_dim}, "
+                f"got {task_emb_T_E.shape[-1]}. Check task embedding dimension."
+            )
+
         for task in range(self.num_tasks):
             task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
 
@@ -1321,8 +1345,9 @@ class Block(nn.Module):
             aux['stats']['aggregated_positions_mlp'] = mlp_agg_needed.sum().item()
 
         # (9) Build curr_state with curr_bits for next block
-        # curr_bits를 reuse_bits로 전달: 다음 블록에서 prev_state.shared_bits로 사용됨
-        curr_state = self._build_router_state(curr_selector_tbN, reuse_bits=curr_bits)
+        # curr_bits를 shared_bits로 저장: 다음 블록에서 prev_state.shared_bits로 읽혀서
+        # post-attn aggregation과 reuse detection에 사용됨
+        curr_state = self._build_router_state(curr_selector_tbN)
 
         return outs, curr_state, aux
 

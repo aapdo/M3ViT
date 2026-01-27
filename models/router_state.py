@@ -18,22 +18,20 @@ class RouterState:
 
     This state is used by the next MoE block to:
     1. Determine which tokens should be aggregated after attention
-    2. (Phase 2) Determine which MoE computations can be reused
+    2. Determine which MoE computations can be reused (via prev_state.shared_bits)
 
     Attributes:
         shared_bits: [B, N] int64 bitmask where each bit represents whether
                      a task uses shared gate. Bit t is 1 if task t has
                      selector_output > 0.5
+                     This becomes prev_bits in the next block for:
+                     - Post-attention aggregation (when popcount >= 2)
+                     - Reuse detection (reuse_bits = prev_bits & curr_bits)
         shared_selector: [T, B, N] float, optional. The raw selector outputs
                         for soft aggregation or debugging
-        reuse_bits: [B, N] int64 bitmask, optional. Bitmask for next block
-                    indicating which tasks can potentially reuse computation.
-                    This is curr_bits from current block, passed to next block
-                    where it becomes prev_bits for reuse detection.
     """
     shared_bits: torch.Tensor  # [B, N] int64 bitmask
     shared_selector: torch.Tensor | None = None  # [T, B, N] float
-    reuse_bits: torch.Tensor | None = None  # [B, N] int64 - for next block
 
 
 def selector_to_bits(selector_tbN: torch.Tensor, thr: float = 0.5) -> torch.Tensor:
