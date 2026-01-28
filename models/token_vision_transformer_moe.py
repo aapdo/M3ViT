@@ -1024,64 +1024,37 @@ class TokenBlock(nn.Module):
             "task_emb_T_E": task_emb_T_E,              # (forward에서 따로 넣던거 여기서 포함)
         }
         return router_out
-
     def moe_stage(self, outs: dict, router_out: dict):
         """
         routing + experts + (shared) drop_path + cache reuse
 
         router_out expected keys:
-        - curr_selector: List[Tensor[B,N]] length T
-        - gate_shared_emb: Tensor[B,N,E]
+        - selector: List[Tensor[B,N]] length T     # <- (changed from curr_selector)
+        - gate_shared_emb: Tensor[B,N,E] or None   # <- can be None (e.g., first MoE)
         - reuse_bits: Tensor[B,N] int64 or None
-        - cached_moe_component: Tensor[B,N,C] or None   (we will treat this as cache for (mlp_drop(expert_out)))
+        - cached_moe_component: Tensor[B,N,C] or None   (cache for mlp_drop(expert_out), NOT drop_path)
         - cached_valid_mask: Tensor[B,N] bool or None
         - task_emb_T_E: Tensor[T,E] or None   (IMPORTANT for single-gate)
         """
-        def _shared_drop_path(self, x: torch.Tensor):
-            """
-            Shared stochastic depth mask (same for all tasks in this block).
-            - Typical DropPath is per-sample (B,1,1) broadcast.
-            Returns:
-            x_dropped, mask  (mask is None if disabled)
-            """
-            # Identity or eval mode: no drop
-            if (not self.training) or (not hasattr(self.drop_path, "drop_prob")):
-                return x, None
-
-            drop_prob = float(getattr(self.drop_path, "drop_prob", 0.0))
-            if drop_prob <= 0.0:
-                return x, None
-
-            keep_prob = 1.0 - drop_prob
-            B = x.shape[0]
-            # per-sample mask, broadcast over tokens & channels
-            mask = x.new_empty((B, 1, 1)).bernoulli_(keep_prob)
-            x = x / keep_prob * mask
-            return x, mask
-
         T = self.num_tasks
         device = outs[0].device
         B, N, C = outs[0].shape
 
-        curr_selector = router_out["curr_selector"]
-        gate_shared_emb = router_out["gate_shared_emb"]
+        selector_list = router_out["selector"]  # List[Tensor[B,N]]
+        gate_shared_emb = router_out.get("gate_shared_emb", None)
         reuse_bits = router_out.get("reuse_bits", None)
 
-        cached = router_out.get("cached_moe_component", None)  # cache for "mlp_drop(expert_out)" (NOT drop_path)
+        cached = router_out.get("cached_moe_component", None)
         cached_valid = router_out.get("cached_valid_mask", None)
 
         task_emb_T_E = router_out.get("task_emb_T_E", None)
-        if (not self.multi_gate):
+        if not self.multi_gate:
             assert task_emb_T_E is not None, "single-gate(multi_gate=False) requires task_emb_T_E in router_out"
 
         # ---- shared drop-path mask sampled ONCE for this block ----
-        # We'll apply this AFTER (reuse/cache merge) so reuse stays consistent.
-        # (Shared mask = same across tasks)
         shared_dp_mask = None
-        # We sample mask lazily by calling helper with a dummy tensor of correct shape
-        # to avoid second forward; easiest: sample using zeros and reuse it.
         dummy = outs[0].new_zeros((B, N, C))
-        _, shared_dp_mask = _shared_drop_path(dummy)
+        _, shared_dp_mask = self._shared_drop_path(dummy)
 
         moe_aux = {
             "cv_loss": outs[0].new_tensor(0.0),
@@ -1093,9 +1066,9 @@ class TokenBlock(nn.Module):
         }
 
         for task in range(T):
-            x = outs[task]                     # [B,N,C]
-            selector = curr_selector[task]     # [B,N]
-            normed = self.norm2(x)             # [B,N,C]
+            x = outs[task]                 # [B,N,C]
+            selector = selector_list[task] # [B,N]
+            normed = self.norm2(x)         # [B,N,C]
 
             task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
 
@@ -1104,7 +1077,7 @@ class TokenBlock(nn.Module):
             cache_fill_mask = None
 
             if (reuse_bits is not None) and (cached_valid is not None):
-                task_in_reuse = ((reuse_bits >> task) & 1).bool()   # [B,N]
+                task_in_reuse = ((reuse_bits >> task) & 1).bool()  # [B,N]
                 if task_in_reuse.any():
                     can_reuse_mask = task_in_reuse & cached_valid
 
@@ -1119,36 +1092,38 @@ class TokenBlock(nn.Module):
                 task_shared = (selector > 0.5)
                 compute_mask = task_specific | (task_shared & (~can_reuse_mask))
 
-            # If nothing to compute, just reuse cached on the reuse positions.
-            # (Should be rare, but possible)
+            # ---- full reuse (nothing to compute) ----
             if not compute_mask.any():
                 assert cached is not None, "compute_mask empty but cache is None"
-                expert_drop_out = cached  # already mlp_drop'ed
+                expert_drop_out = cached
                 moe_aux["stats"]["reused_tokens"] += int((can_reuse_mask is not None) and can_reuse_mask.sum().item())
 
-                # apply shared drop_path mask
                 if shared_dp_mask is not None:
-                    moe_component = expert_drop_out * (shared_dp_mask / (1.0 - self.drop_path.drop_prob))
+                    keep_prob = 1.0 - float(self.drop_path.drop_prob)
+                    moe_component = expert_drop_out / keep_prob * shared_dp_mask
                 else:
                     moe_component = expert_drop_out
 
                 outs[task] = x + moe_component
-                # cv_loss contrib = 0 (no gate routing)
                 continue
 
             # ---- Gather compute tokens ----
-            compute_flat = compute_mask.flatten()                 # [B*N]
+            compute_flat = compute_mask.flatten()             # [B*N]
             K = int(compute_flat.sum().item())
             moe_aux["stats"]["computed_tokens"] += K
 
             normed_flat = normed.reshape(B * N, C)
-            normed_compute = normed_flat[compute_flat]            # [K,C]
+            normed_compute = normed_flat[compute_flat]        # [K,C]
 
             selector_flat = selector.flatten()
-            selector_compute = selector_flat[compute_flat]        # [K]
+            selector_compute = selector_flat[compute_flat]    # [K]
 
-            shared_emb_flat = gate_shared_emb.reshape(B * N, -1)
-            shared_emb_compute = shared_emb_flat[compute_flat]    # [K,E]
+            # ✅ 2) gate_shared_emb None-safe: None이면 shared_emb_compute=None
+            if gate_shared_emb is None:
+                shared_emb_compute = None
+            else:
+                shared_emb_flat = gate_shared_emb.reshape(B * N, -1)
+                shared_emb_compute = shared_emb_flat[compute_flat]  # [K,E]
 
             # ---- gate routing only for computed tokens ----
             gate_idx, gate_score, gate_info = self._route_tokens(
@@ -1168,10 +1143,9 @@ class TokenBlock(nn.Module):
             expert_out = expert_out.view(B, N, C)  # [B,N,C]
 
             # ---- mlp_drop (ONLY computed path) ----
-            # We apply dropout here; for cached(reused) tokens we DO NOT re-dropout.
-            expert_drop_out = self.mlp_drop(expert_out)  # [B,N,C] (zeros elsewhere stay zeros)
+            expert_drop_out = self.mlp_drop(expert_out)  # [B,N,C]
 
-            # ---- cache populate (store mlp_drop(expert_out) for reuse positions only) ----
+            # ---- cache populate ----
             if (cache_fill_mask is not None) and cache_fill_mask.any():
                 assert cached is not None, "cache_fill_mask exists but cached tensor is None"
                 cached_valid[cache_fill_mask] = True
@@ -1179,7 +1153,7 @@ class TokenBlock(nn.Module):
 
                 cached = torch.where(
                     cache_fill_mask.unsqueeze(-1),
-                    expert_drop_out,   # value with dropout, has grad
+                    expert_drop_out,
                     cached
                 )
 
@@ -1189,11 +1163,11 @@ class TokenBlock(nn.Module):
                 moe_aux["stats"]["reused_tokens"] += int(can_reuse_mask.sum().item())
                 expert_drop_out = torch.where(
                     can_reuse_mask.unsqueeze(-1),
-                    cached,              # cached already contains dropout
+                    cached,
                     expert_drop_out
                 )
 
-            # ---- apply SHARED drop_path mask (same across tasks) ----
+            # ---- apply SHARED drop_path mask ----
             if shared_dp_mask is not None:
                 keep_prob = 1.0 - float(self.drop_path.drop_prob)
                 moe_component = expert_drop_out / keep_prob * shared_dp_mask
@@ -1207,8 +1181,28 @@ class TokenBlock(nn.Module):
 
         # write back cache (functional update)
         router_out["cached_moe_component"] = cached
-
         return outs, moe_aux
+    def _shared_drop_path(self, x: torch.Tensor):
+        """
+        Shared stochastic depth mask (same for all tasks in this block).
+        - Typical DropPath is per-sample (B,1,1) broadcast.
+        Returns:
+        x_dropped, mask  (mask is None if disabled)
+        """
+        # Identity or eval mode: no drop
+        if (not self.training) or (not hasattr(self.drop_path, "drop_prob")):
+            return x, None
+
+        drop_prob = float(getattr(self.drop_path, "drop_prob", 0.0))
+        if drop_prob <= 0.0:
+            return x, None
+
+        keep_prob = 1.0 - drop_prob
+        B = x.shape[0]
+        # per-sample mask, broadcast over tokens & channels
+        mask = x.new_empty((B, 1, 1)).bernoulli_(keep_prob)
+        x = x / keep_prob * mask
+        return x, mask
     # ==========================================================================
     # forward
     # ==========================================================================
@@ -1485,17 +1479,6 @@ class TokenVisionTransformerMoE(nn.Module):
                 logger.log_moe_stats(stats)
 
         return outs, total_cv_loss
-
-    # def to_2D(self, x):
-    #     n, hw, c = x.shape
-    #     h = w = int(math.sqrt(hw))
-    #     x = x.transpose(1, 2).reshape(n, c, h, w)
-    #     return x
-
-    # def to_1D(self, x):
-    #     n, c, h, w = x.shape
-    #     x = x.reshape(n, c, -1).transpose(1, 2)
-    #     return x
 
     def _conv_filter(self, state_dict, patch_size=16):
         """ convert patch embedding weight from manual patchify + linear proj to conv"""
