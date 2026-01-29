@@ -296,10 +296,16 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
 
     model.train()
 
+    # Throughput tracking
+    batch_start_time = None
+    batch_size = None
+
     for i, batch in enumerate(train_loader):
+        batch_start_time = time.time()
         batch = handle_forward_hook_data(args, batch) # Added line
         # Forward pass
         images = batch['image'].cuda(args.local_rank, non_blocking=True)
+        batch_size = images.shape[0]
         targets = {task: batch[task].cuda(args.local_rank, non_blocking=True) for task in p.ALL_TASKS.NAMES}
 
         if args.one_by_one:
@@ -380,6 +386,19 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 step = epoch * len(train_loader) + i
                 wandb_logger.log_train_losses(losses, p)
                 wandb_logger.log({"iteration": step})
+
+                # Step time & throughput
+                if batch_start_time is not None:
+                    step_time = time.time() - batch_start_time
+                    throughput = batch_size / step_time if step_time > 0 else 0.0
+                    wandb_logger.log({
+                        "train/step_time": step_time,
+                        "train/throughput_images_per_sec": throughput,
+                    })
+
+                # Current optimizer LR (reflects any mid-epoch changes)
+                current_lr = optimizer.param_groups[0]["lr"]
+                wandb_logger.log({"train/lr": current_lr})
 
             # for name, param in model.named_parameters():
             #     if 'gamma' in name:

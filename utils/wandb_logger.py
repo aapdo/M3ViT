@@ -312,35 +312,48 @@ class WandbLogger:
 
     def log_moe_stats(self, stats: Dict):
         """
-        Log MoE statistics (reuse ratio, aggregation ratio, etc.)
+        Log MoE statistics from TokenVisionTransformerMoE.forward() stats dict.
 
         Args:
-            stats: dictionary containing MoE statistics
-                - reuse_ratio: ratio of reusable tokens
-                - aggregation_ratio: ratio of aggregated tokens
-                - shared_gate_ratio: ratio of tokens using shared gate
-                - total_tokens: total number of tokens processed
-                - moe_blocks: number of MoE blocks
+            stats: dictionary containing MoE statistics produced by the model:
+                - shared_position_ratio   : ratio of positions with ≥1 shared task
+                - shared_tasktoken_ratio  : ratio of task-tokens routed through shared gate
+                - aggregation_ratio       : ratio of positions with ≥2 shared tasks (avg-pooled)
+                - reuse_ratio             : ratio of dispatched task-tokens reused from cache
+                - compute_ratio           : ratio of dispatched task-tokens actually computed
+                - computed_tokens         : absolute count of computed task-tokens
+                - reused_tokens           : absolute count of reused task-tokens
+                - total_positions         : B*N summed across MoE blocks
+                - moe_blocks              : number of MoE blocks
         """
         if not self.enabled:
             return
 
         metrics = {}
 
-        if 'reuse_ratio' in stats:
-            metrics["moe/reuse_ratio"] = stats['reuse_ratio']
+        # Routing ratios (position-scale)
+        if 'shared_position_ratio' in stats:
+            metrics["moe/shared_position_ratio"] = stats['shared_position_ratio']
+        if 'shared_tasktoken_ratio' in stats:
+            metrics["moe/shared_tasktoken_ratio"] = stats['shared_tasktoken_ratio']
+
+        # Aggregation ratio
         if 'aggregation_ratio' in stats:
             metrics["moe/aggregation_ratio"] = stats['aggregation_ratio']
-        if 'shared_gate_ratio' in stats:
-            metrics["moe/shared_gate_ratio"] = stats['shared_gate_ratio']
-        if 'total_tokens' in stats:
-            metrics["moe/total_tokens"] = stats['total_tokens']
-        if 'reusable_tokens' in stats:
-            metrics["moe/reusable_tokens"] = stats['reusable_tokens']
-        if 'aggregated_tokens' in stats:
-            metrics["moe/aggregated_tokens"] = stats['aggregated_tokens']
-        if 'shared_gate_tokens' in stats:
-            metrics["moe/shared_gate_tokens"] = stats['shared_gate_tokens']
+
+        # Compute/reuse ratios (task-token-scale)
+        if 'reuse_ratio' in stats:
+            metrics["moe/reuse_ratio"] = stats['reuse_ratio']
+        if 'compute_ratio' in stats:
+            metrics["moe/compute_ratio"] = stats['compute_ratio']
+
+        # Absolute counts
+        if 'computed_tokens' in stats:
+            metrics["moe/computed_tokens"] = stats['computed_tokens']
+        if 'reused_tokens' in stats:
+            metrics["moe/reused_tokens"] = stats['reused_tokens']
+        if 'total_positions' in stats:
+            metrics["moe/total_positions"] = stats['total_positions']
         if 'moe_blocks' in stats:
             metrics["moe/moe_blocks"] = stats['moe_blocks']
 

@@ -183,7 +183,7 @@ def main():
     if args.lr is not None:
         p['optimizer_kwargs']['lr'] = args.lr
     if args.opt is not None:
-        p['optimizer'] == args.opt
+        p['optimizer'] = args.opt
     if args.weight_decay is not None:
         p['optimizer_kwargs']['weight_decay'] = args.weight_decay
     if args.epochs is not None:
@@ -457,10 +457,17 @@ def main():
     # Initialize wandb logger (only on rank 0)
     wandb_logger = WandbLogger(enabled=(args.use_wandb and args.local_rank == 0))
     if wandb_logger.enabled:
+        # Auto-generate run name in KST (UTC+9) if not explicitly provided
+        wandb_run_name = args.wandb_name
+        if wandb_run_name is None:
+            from datetime import datetime, timezone, timedelta
+            kst = timezone(timedelta(hours=9))
+            wandb_run_name = datetime.now(kst).strftime("%Y%m%d_%H%M")
+
         wandb_logger.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=args.wandb_name,
+            name=wandb_run_name,
             config=None  # Will be set by log_config
         )
         wandb_logger.log_config(p, args)

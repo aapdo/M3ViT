@@ -391,7 +391,7 @@ class TokenBlock(nn.Module):
         super().__init__()
         self.moe = moe
         self.moe_top_k = moe_top_k
-        self.tot_expert = moe_experts
+        self.tot_expert = moe_experts * world_size
         self.num_tasks = num_tasks
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
@@ -634,7 +634,7 @@ class TokenBlock(nn.Module):
                 # multi_gate: separate gate per task, no need for task embedding
                 (t_idx, t_score), t_clean, t_noisy, t_noise_std, t_top, t_gates = self.gate[task_id](task_inp)
             else:
-                # single gate: concat task embedding to distinguish tasks
+                # single gate: concat task embedding to distinguish
                 assert task_emb_flat is not None, "task_emb required for single gate mode"
                 task_inp = torch.cat([task_inp, task_emb_flat[task_mask]], dim=-1)
                 (t_idx, t_score), t_clean, t_noisy, t_noise_std, t_top, t_gates = self.gate(task_inp, task_id=task_id)
@@ -702,10 +702,9 @@ class TokenBlock(nn.Module):
             "cv_loss": ref.new_tensor(0.0),
             "stats": {
                 "total_positions": 0,
-                "shared_positions_prev": 0,
-                "aggregated_positions_attn": 0,
-                "shared_positions_curr": 0,
-                "aggregated_positions_mlp": 0,
+                "shared_positions": 0,
+                "shared_tasktoken_count": 0,
+                "aggregated_positions": 0,
             },
         }
 
@@ -816,10 +815,6 @@ class TokenBlock(nn.Module):
         # Perform aggregation (AggregationStage should handle dict outs)
         outs = self.attn_post_aggr(outs, prev_task_masks, attn_agg_needed)
 
-        # Update stats
-        aux["stats"]["shared_positions_prev"] = int((prev_count > 0).sum().item())
-        aux["stats"]["aggregated_positions_attn"] = int(attn_agg_needed.sum().item())
-
         return outs, aux
 
     def after_moe_aggregate_stage(self, outs: dict, curr_bits: torch.Tensor, aux: dict):
@@ -841,10 +836,11 @@ class TokenBlock(nn.Module):
         curr_task_masks = bits_to_task_masks(curr_bits, self.num_tasks)
         outs = self.mlp_post_aggr(outs, curr_task_masks, mlp_agg_needed)
 
-        # stats 업데이트(있으면 누적)
+        # stats 업데이트
         stats = aux.setdefault("stats", {})
-        stats["shared_positions_curr"] = stats.get("shared_positions_curr", 0) + (curr_count > 0).sum().item()
-        stats["aggregated_positions_mlp"] = stats.get("aggregated_positions_mlp", 0) + mlp_agg_needed.sum().item()
+        stats["shared_positions"] = stats.get("shared_positions", 0) + int((curr_count > 0).sum().item())
+        stats["shared_tasktoken_count"] = stats.get("shared_tasktoken_count", 0) + int(curr_count.sum().item())
+        stats["aggregated_positions"] = stats.get("aggregated_positions", 0) + int(mlp_agg_needed.sum().item())
 
         return outs, aux
     
@@ -1061,7 +1057,6 @@ class TokenBlock(nn.Module):
             "stats": {
                 "computed_tokens": 0,
                 "reused_tokens": 0,
-                "cache_filled_tokens": 0,
             }
         }
 
@@ -1118,7 +1113,6 @@ class TokenBlock(nn.Module):
             selector_flat = selector.flatten()
             selector_compute = selector_flat[compute_flat]    # [K]
 
-            # ✅ 2) gate_shared_emb None-safe: None이면 shared_emb_compute=None
             if gate_shared_emb is None:
                 shared_emb_compute = None
             else:
@@ -1149,7 +1143,6 @@ class TokenBlock(nn.Module):
             if (cache_fill_mask is not None) and cache_fill_mask.any():
                 assert cached is not None, "cache_fill_mask exists but cached tensor is None"
                 cached_valid[cache_fill_mask] = True
-                moe_aux["stats"]["cache_filled_tokens"] += int(cache_fill_mask.sum().item())
 
                 cached = torch.where(
                     cache_fill_mask.unsqueeze(-1),
@@ -1305,11 +1298,17 @@ class TokenVisionTransformerMoE(nn.Module):
         self.num_tasks = num_tasks
         self.gate_task_specific_dim = gate_task_specific_dim
         self.gate_input_ahead = gate_input_ahead
-        # if self.gate_task_specific_dim<0 or self.multi_gate:
-            # self.gate_task_represent = None
-        # else:
 
-        self.gate_task_represent = new_Mlp(in_features=self.num_tasks, hidden_features=int(self.gate_task_specific_dim), out_features=self.gate_task_specific_dim,)
+        if self.gate_task_specific_dim <= 0:
+            raise ValueError("gate_task_specific_dim must be > 0 for TokenVisionTransformerMoE MoE routing.")
+        if self.num_tasks <= 0:
+            raise ValueError("num_tasks must be > 0 to build task embeddings for routing.")
+
+        self.gate_task_represent = new_Mlp(
+            in_features=self.num_tasks,
+            hidden_features=int(self.gate_task_specific_dim),
+            out_features=self.gate_task_specific_dim,
+        )
 
             # self.gamma = nn.Parameter(torch.Tensor([1]), requires_grad=True)
         for i in range(self.depth):
@@ -1397,83 +1396,107 @@ class TokenVisionTransformerMoE(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
 
-    def forward(self, x, gate_inp=None, sem=None):
+    def forward(self, x, sem=None):
         """
-        Simplified Forward:
-        - Delegates block-level logic to Block.forward
-        - Only handles: input prep, block iteration, state passing, aux aggregation
+        Simplified Forward (refactored for new TokenBlock API):
+        - Prepares tokens
+        - Builds per-task outputs dict (safe: clone per task)
+        - Builds task_emb_T_E once per forward (stable: fp32 one-hot -> cast back)
+        - Iterates blocks with RouterState passing
+        - Aggregates aux (cv_loss + stats)
         """
         B = x.shape[0]
-        x = self.patch_embed(x)
-        x = x.flatten(2).transpose(1, 2)
+
+        # ---- patch + cls + pos ----
+        x = self.patch_embed(x)                    # [B, C, H', W'] or [B, embed, h, w] depending on PatchEmbed
+        x = x.flatten(2).transpose(1, 2)           # [B, N, C]
         cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
+        x = torch.cat((cls_tokens, x), dim=1)      # [B, 1+N, C]
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        # Create task embedding cache: one-hot -> embedding for each task
-        # task_emb_T_E: [T, E] - cached embeddings for all tasks
-        # This is computed once and reused across all blocks
-        eye = torch.eye(self.num_tasks, device=x.device, dtype=x.dtype)  # [T, T]
-        task_emb_T_E = self.gate_task_represent(eye)  # [T, E]
+        # ---- task embedding cache: one-hot (fp32) -> gate_task_represent -> cast to x.dtype ----
+        # task_emb_T_E: [T, E]
+        if self.gate_task_represent is None:
+            raise RuntimeError("gate_task_represent is not initialized; check gate_task_specific_dim/num_tasks.")
+        eye = torch.eye(self.num_tasks, device=x.device, dtype=torch.float32)
+        task_emb_T_E = self.gate_task_represent(eye).to(dtype=x.dtype)
 
-        # Initialize dict to store outputs for each task
-        outs = {task: x for task in range(self.num_tasks)}
+        # ---- per-task outputs (clone to avoid accidental in-place cross-talk) ----
+        outs = {task: x.clone() for task in range(self.num_tasks)}
 
-        # RouterState: stores previous MoE block selector (None for first MoE block)
+        # ---- RouterState from previous MoE block ----
         prev_state = None
 
-        # Initialize total cv_loss
+        # ---- totals ----
         total_cv_loss = x.new_tensor(0.0)
-
-        # Initialize statistics counters
+        T = self.num_tasks
         stats = {
-            'moe_blocks': 0,
-            'total_positions': 0,
-            'shared_positions_prev': 0,
-            'aggregated_positions_attn': 0,
-            'shared_positions_curr': 0,
-            'aggregated_positions_mlp': 0,
+            "moe_blocks": 0,
+            "total_positions": 0,           # B*N per MoE block, summed
+            "shared_positions": 0,          # #positions where curr_count > 0
+            "shared_tasktoken_count": 0,    # sum(curr_count) across positions
+            "aggregated_positions": 0,      # #positions where curr_count >= 2
+            "computed_tokens": 0,           # task-token granularity
+            "reused_tokens": 0,             # task-token granularity
         }
 
-        # Block iteration with state management
+        # ---- block iteration ----
         for blk in self.blocks:
             outs, curr_state, aux = blk(
-                outs, prev_state,
-                gate_inp=gate_inp,
+                outs,
+                prev_state,
                 task_emb_T_E=task_emb_T_E,
-                gate_task_represent=self.gate_task_represent
+                gate_task_represent=self.gate_task_represent,
             )
 
-            # Accumulate cv_loss
-            total_cv_loss = total_cv_loss + aux['cv_loss']
+            # cv loss
+            total_cv_loss = total_cv_loss + aux.get("cv_loss", x.new_tensor(0.0))
 
-            # Accumulate stats (only MoE blocks contribute meaningful stats)
-            if blk.moe:
-                stats['moe_blocks'] += 1
-                for key in ['total_positions', 'shared_positions_prev', 'aggregated_positions_attn',
-                           'shared_positions_curr', 'aggregated_positions_mlp']:
-                    stats[key] += aux['stats'].get(key, 0)
+            # stats (count only MoE blocks)
+            if getattr(blk, "moe", False):
+                stats["moe_blocks"] += 1
+                for k in [
+                    "total_positions",
+                    "shared_positions",
+                    "shared_tasktoken_count",
+                    "aggregated_positions",
+                    "computed_tokens",
+                    "reused_tokens",
+                ]:
+                    stats[k] += aux.get("stats", {}).get(k, 0)
 
-            # Update state: current state becomes prev for next block
-            # Only MoE blocks produce curr_state; NonMoE blocks return None
-            if curr_state is not None:
-                prev_state = curr_state
+            # state for next block
+            prev_state = curr_state
 
-        # Calculate statistics ratios
-        if stats['total_positions'] > 0:
-            stats['attn_aggregation_ratio'] = stats['aggregated_positions_attn'] / stats['total_positions']
-            stats['mlp_aggregation_ratio'] = stats['aggregated_positions_mlp'] / stats['total_positions']
-            stats['shared_prev_ratio'] = stats['shared_positions_prev'] / stats['total_positions']
-            stats['shared_curr_ratio'] = stats['shared_positions_curr'] / stats['total_positions']
+        # ---- ratios ----
+        # A) position-scale ratios (denom = B*N*moe_blocks)
+        total_pos = float(stats["total_positions"])
+        if total_pos > 0:
+            stats["shared_position_ratio"] = stats["shared_positions"] / total_pos
+            stats["aggregation_ratio"] = stats["aggregated_positions"] / total_pos
         else:
-            stats['attn_aggregation_ratio'] = 0.0
-            stats['mlp_aggregation_ratio'] = 0.0
-            stats['shared_prev_ratio'] = 0.0
-            stats['shared_curr_ratio'] = 0.0
+            stats["shared_position_ratio"] = 0.0
+            stats["aggregation_ratio"] = 0.0
 
-        # Log MoE stats to wandb if available (only during training)
-        if self.training and stats['total_positions'] > 0 and self.wandb_logger is not None:
+        # B) task-token-scale ratio (denom = B*N*T*moe_blocks)
+        total_tasktoken = float(stats["total_positions"]) * T
+        if total_tasktoken > 0:
+            stats["shared_tasktoken_ratio"] = stats["shared_tasktoken_count"] / total_tasktoken
+        else:
+            stats["shared_tasktoken_ratio"] = 0.0
+
+        # C) compute/reuse ratios (denom = computed + reused)
+        total_dispatched = stats["computed_tokens"] + stats["reused_tokens"]
+        if total_dispatched > 0:
+            stats["reuse_ratio"] = stats["reused_tokens"] / total_dispatched
+            stats["compute_ratio"] = stats["computed_tokens"] / total_dispatched
+        else:
+            stats["reuse_ratio"] = 0.0
+            stats["compute_ratio"] = 1.0
+
+        # ---- wandb logging (train only) ----
+        if self.training and stats["total_positions"] > 0 and self.wandb_logger is not None:
             logger = self.wandb_logger()
             if logger is not None:
                 logger.log_moe_stats(stats)
