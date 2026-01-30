@@ -99,3 +99,4 @@ eval_final_10_epochs_only: True
 # eval_final_10_epochs_only: False
 
 
+eval_interval: 10

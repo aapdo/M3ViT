@@ -35,6 +35,8 @@ from thop import clever_format
 from thop import profile
 from utils.tracing import setup_forward_hooks, wrap_datasets_for_forward_hook, handle_forward_hook_data, \
                             patch_and_log_initializations, restore_original_initializations
+import wandb
+
 def set_random_seed(seed, deterministic=False):
     """Set random seed.
 
@@ -471,6 +473,12 @@ def main():
             config=None  # Will be set by log_config
         )
         wandb_logger.log_config(p, args)
+
+        # Save config files to wandb if they exist
+        if args.config_env and os.path.exists(args.config_env):
+            wandb.save(args.config_env)
+        if args.config_exp and os.path.exists(args.config_exp):
+            wandb.save(args.config_exp)
 
     # Set as global instance
     set_wandb_logger(wandb_logger)

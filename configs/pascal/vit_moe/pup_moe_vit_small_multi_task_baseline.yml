@@ -23,7 +23,7 @@ model_kwargs:
    tam: True
    tam_level0: True
    tam_level1: True
-   tam_level2: False
+   tam_level2: True
 backbone: VisionTransformer_moe
 backbone_kwargs:
    dilated: False
@@ -97,3 +97,4 @@ loss_kwargs:
 eval_final_10_epochs_only: True
 
 
+eval_interval: 10
