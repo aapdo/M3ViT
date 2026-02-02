@@ -477,13 +477,11 @@ class VisionTransformer(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        outs = []
         for i, blk in enumerate(self.blocks):
             x = blk(x)
-            # print('i',i)
-            if i in self.out_indices:
-                outs.append(x)
-        return tuple(outs)
+
+        # Return only the output from the last block
+        return x
 
     def flops(self):
         flops = 0
