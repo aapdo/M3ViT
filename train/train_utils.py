@@ -346,9 +346,17 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             id=0
             for single_task in p.TASKS.NAMES:
                 if args.task_one_hot:
-                    output, cv_losses = model(images, single_task=single_task, task_id=id)
+                    model_output = model(images, single_task=single_task, task_id=id)
                 else:
-                    output, cv_losses = model(images, single_task=single_task)
+                    model_output = model(images, single_task=single_task)
+
+                # Unpack output based on use_cv_loss flag
+                if p.get('use_cv_loss', False) and isinstance(model_output, tuple):
+                    output, cv_losses = model_output
+                else:
+                    output = model_output
+                    cv_losses = None
+
                 id=id+1
                 loss_dict = criterion(output, targets, single_task)
 
@@ -357,9 +365,7 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 performance_meter.update({single_task: get_output(output[single_task], single_task)},
                                  {single_task: targets[single_task]})
 
-                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
-                    # gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
-
+                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed) and p.get('use_cv_loss', False) and cv_losses is not None:
                     # Add CV losses from blocks
 
                     cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
@@ -370,7 +376,9 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 loss_dict['total'].backward()
 
                 # Explicitly delete intermediate tensors to free memory
-                del output, loss_dict, cv_losses
+                del output, loss_dict
+                if cv_losses is not None:
+                    del cv_losses
                 if 'cv_loss_total' in locals():
                     del cv_loss_total
 
@@ -386,15 +394,21 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
 
         else:
             if (args.regu_sem or args.sem_force or args.regu_subimage) and epoch<args.warmup_epochs:
-                output, cv_losses = model(images,sem=targets['semseg'])
+                model_output = model(images,sem=targets['semseg'])
             else:
-                output, cv_losses = model(images)
+                model_output = model(images)
 
+            # Unpack output based on use_cv_loss flag
+            if p.get('use_cv_loss', False) and isinstance(model_output, tuple):
+                output, cv_losses = model_output
+            else:
+                output = model_output
+                cv_losses = None
 
             # Measure loss and performance
             loss_dict = criterion(output, targets)
 
-            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed) and p.get('use_cv_loss', False) and cv_losses is not None:
 
                 # Add CV losses from blocks
                 cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
