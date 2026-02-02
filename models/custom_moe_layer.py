@@ -212,7 +212,8 @@ class FMoETransformerMLP(FMoE):
 
         if (task_id is not None) and self.multi_gate:
             # print('in custom moe_layer,task_id',task_id)
-            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp)
+            # (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp)
+            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp, sem=sem)
         else:
             (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate(gate_inp, task_id=task_id,sem=sem)
 
@@ -228,7 +229,13 @@ class FMoETransformerMLP(FMoE):
                 for i in range(sem.shape[-1]):
                     for j in range(len(self.force_id)):
                         if sem[k,i] in self.force_id[j]:
-                            gate_top_k_idx[k,i+1,:]=[j*2,j*2+1]
+                            # Create expert indices for this group
+                            expert_indices = [j*2, j*2+1]
+                            # Pad or truncate to match top_k
+                            if self.top_k > 2:
+                                # Repeat the pattern to fill top_k slots
+                                expert_indices = (expert_indices * ((self.top_k + 1) // 2))[:self.top_k]
+                            gate_top_k_idx[k,i+1,:] = torch.tensor(expert_indices, device=gate_top_k_idx.device, dtype=gate_top_k_idx.dtype)
             gate_top_k_idx = gate_top_k_idx.reshape(-1,self.top_k)
             gate_score =  torch.ones((gate_score.shape[0],self.top_k),device=gate_score.device)*0.5
 

@@ -158,6 +158,7 @@ parser.add_argument('--use_wandb', action='store_true', help='use wandb for logg
 parser.add_argument('--wandb_project', type=str, default='m3vit-training', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity (team name)')
 parser.add_argument('--wandb_name', type=str, default=None, help='wandb run name')
+parser.add_argument('--use_cv_loss', default=True, type=str2bool, help='whether model returns cv_loss (default: True for training)')
 
 args = parser.parse_args()
 

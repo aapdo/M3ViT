@@ -58,20 +58,21 @@ class ProgressMeter(object):
 
 
 def get_output(output, task):
-    output = output.permute(0, 2, 3, 1)
-    
+    # Detach to prevent keeping computation graph in memory
+    output = output.detach().permute(0, 2, 3, 1)
+
     if task == 'normals':
         output = (F.normalize(output, p = 2, dim = 3) + 1.0) * 255 / 2.0
-    
+
     elif task in {'semseg', 'human_parts'}:
         _, output = torch.max(output, dim=3)
-    
+
     elif task in {'edge', 'sal'}:
         output = torch.squeeze(255 * 1 / (1 + torch.exp(-output)))
-    
+
     elif task in {'depth'}:
         pass
-    
+
     else:
         raise ValueError('Select one of the valid tasks')
 

@@ -19,6 +19,7 @@ from os.path import join
 from utils.moe_utils import collect_noisy_gating_loss,collect_semregu_loss, collect_regu_subimage_loss
 from utils.tracing import handle_forward_hook_data
 from utils.wandb_logger import WandbLogger
+import gc
 def get_loss_meters(p):
     """ Return dictionary with loss meters to monitor training """
     all_tasks = p.ALL_TASKS.NAMES
@@ -95,6 +96,8 @@ def get_loss_meters(p):
 
     losses['total'] = AverageMeter('Loss Total', ':.4e')
     losses['gating'] = AverageMeter('Loss Gating', ':.4e')
+    losses['semregu'] = AverageMeter('Loss SemRegu', ':.4e')
+    losses['regu_subimage'] = AverageMeter('Loss ReguSubimage', ':.4e')
     return losses
 
 def logits_aug(logits, low=0.01, high=9.99):
@@ -106,7 +109,7 @@ def logits_aug(logits, low=0.01, high=9.99):
 def adjust_epsilon_greedy(p, epoch):
     return 0.5 * max((1 - epoch/(p['epochs'] - p['left'])), 0)
 
-def train_vanilla(p, train_loader, model, criterion, optimizer, epoch):
+def train_vanilla(p, train_loader, model, criterion, optimizer, epoch, wandb_logger=None):
     """ Vanilla training with fixed loss weights """
     losses = get_loss_meters(p)
     performance_meter = PerformanceMeter(p)
@@ -114,20 +117,26 @@ def train_vanilla(p, train_loader, model, criterion, optimizer, epoch):
         [v for v in losses.values()], prefix="Epoch: [{}]".format(epoch))
 
     model.train()
-    
+
+    # Throughput tracking
+    batch_start_time = None
+    batch_size = None
+
     for i, batch in enumerate(train_loader):
+        batch_start_time = time.time()
         # Forward pass
         images = batch['image'].cuda(non_blocking=True)
+        batch_size = images.shape[0]
         targets = {task: batch[task].cuda(non_blocking=True) for task in p.ALL_TASKS.NAMES}
         output = model(images)
-        
+
         # Measure loss and performance
         loss_dict = criterion(output, targets)
         for k, v in loss_dict.items():
             losses[k].update(v.item())
-        performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES}, 
+        performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES},
                                  {t: targets[t] for t in p.TASKS.NAMES})
-        
+
         # Backward
         optimizer.zero_grad()
         loss_dict['total'].backward()
@@ -136,7 +145,31 @@ def train_vanilla(p, train_loader, model, criterion, optimizer, epoch):
         if i % 25 == 0:
             progress.display(i)
 
+            # Log to wandb every 25 iterations
+            if wandb_logger is not None:
+                step = epoch * len(train_loader) + i
+                wandb_logger.log_train_losses(losses, p)
+                wandb_logger.log({"iteration": step})
+
+                # Step time & throughput
+                if batch_start_time is not None:
+                    step_time = time.time() - batch_start_time
+                    throughput = batch_size / step_time if step_time > 0 else 0.0
+                    wandb_logger.log({
+                        "train/step_time": step_time,
+                        "train/throughput_images_per_sec": throughput,
+                    })
+
+                # Current optimizer LR (reflects any mid-epoch changes)
+                current_lr = optimizer.param_groups[0]["lr"]
+                wandb_logger.log({"train/lr": current_lr})
+
     eval_results = performance_meter.get_score(verbose = True)
+
+    # Log epoch-level training metrics to wandb
+    if wandb_logger is not None:
+        wandb_logger.log_train_performance(eval_results, p)
+        wandb_logger.log_epoch(epoch)
 
     return eval_results
 
@@ -309,7 +342,7 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
         targets = {task: batch[task].cuda(args.local_rank, non_blocking=True) for task in p.ALL_TASKS.NAMES}
 
         if args.one_by_one:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             id=0
             for single_task in p.TASKS.NAMES:
                 if args.task_one_hot:
@@ -332,19 +365,30 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                     cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
 
                     loss_dict['total'] += cv_loss_total
-                    losses['gating'].update(cv_loss_total)
+                    losses['gating'].update(cv_loss_total.item())
                 # Backward
                 loss_dict['total'].backward()
+
+                # Explicitly delete intermediate tensors to free memory
+                del output, loss_dict, cv_losses
+                if 'cv_loss_total' in locals():
+                    del cv_loss_total
+
             if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                     model.allreduce_params()
+                    # Synchronize to ensure allreduce is complete before optimizer step
+                    torch.cuda.synchronize()
 
             optimizer.step()
 
+            # Explicitly delete intermediate tensors after one_by_one loop
+            del images, targets, batch
+
         else:
-            # if (args.regu_sem or args.sem_force or args.regu_subimage) and epoch<args.warmup_epochs:
-            #     output = model(images,sem=targets['semseg'])
-            # else:
-            output, cv_losses = model(images)
+            if (args.regu_sem or args.sem_force or args.regu_subimage) and epoch<args.warmup_epochs:
+                output, cv_losses = model(images,sem=targets['semseg'])
+            else:
+                output, cv_losses = model(images)
 
 
             # Measure loss and performance
@@ -356,13 +400,15 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
 
                 loss_dict['total'] += cv_loss_total
-                losses['gating'].update(cv_loss_total)
-                # if args.regu_sem and epoch<args.warmup_epochs:
-                #     semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
-                #     loss_dict['total'] += semregu_loss
-                # if args.regu_subimage and epoch<args.warmup_epochs:
-                #     regu_subimage_loss = collect_regu_subimage_loss(model, args.subimageregu_weight)
-                #     loss_dict['total']+=regu_subimage_loss
+                losses['gating'].update(cv_loss_total.item())
+                if args.regu_sem and epoch<args.warmup_epochs:
+                    semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
+                    loss_dict['total'] += semregu_loss
+                    losses['semregu'].update(semregu_loss.item() if torch.is_tensor(semregu_loss) else semregu_loss)
+                if args.regu_subimage and epoch<args.warmup_epochs:
+                    regu_subimage_loss = collect_regu_subimage_loss(model, args.subimageregu_weight)
+                    loss_dict['total']+=regu_subimage_loss
+                    losses['regu_subimage'].update(regu_subimage_loss.item() if torch.is_tensor(regu_subimage_loss) else regu_subimage_loss)
             for k, v in loss_dict.items():
                 losses[k].update(v.item())
             performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES},
@@ -375,17 +421,33 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             sys.stdout.flush()
             if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                 model.allreduce_params()
+                # Synchronize to ensure allreduce is complete before optimizer step
+                torch.cuda.synchronize()
             optimizer.step()
-
 
         if i % 25 == 0:
             progress.display(i)
+
+            # Print memory statistics to diagnose memory growth
+            if args.local_rank == 0:
+                allocated = torch.cuda.memory_allocated(args.local_rank) / 1024**3
+                reserved = torch.cuda.memory_reserved(args.local_rank) / 1024**3
+                print(f"[Iter {i}] GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, "
+                      f"Cached but unused: {reserved - allocated:.2f}GB")
 
             # Log to wandb every 25 iterations
             if wandb_logger is not None:
                 step = epoch * len(train_loader) + i
                 wandb_logger.log_train_losses(losses, p)
                 wandb_logger.log({"iteration": step})
+
+                # Log memory stats to wandb
+                if args.local_rank == 0:
+                    wandb_logger.log({
+                        "memory/allocated_gb": torch.cuda.memory_allocated(args.local_rank) / 1024**3,
+                        "memory/reserved_gb": torch.cuda.memory_reserved(args.local_rank) / 1024**3,
+                        "memory/max_allocated_gb": torch.cuda.max_memory_allocated(args.local_rank) / 1024**3,
+                    })
 
                 # Step time & throughput
                 if batch_start_time is not None:

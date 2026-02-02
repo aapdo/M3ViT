@@ -103,15 +103,15 @@ class WandbLogger:
             "depth": p['backbone_kwargs'].get('depth', None),
             "num_heads": p['backbone_kwargs'].get('num_heads', None),
 
-            # MoE settings
-            "moe_experts": args.moe_experts,
-            "moe_top_k": args.moe_top_k,
-            "moe_mlp_ratio": args.moe_mlp_ratio,
-            "moe_gate_type": args.moe_gate_type,
-            "vmoe_noisy_std": args.vmoe_noisy_std,
-            "moe_noisy_gate_loss_weight": args.moe_noisy_gate_loss_weight,
-            "multi_gate": args.multi_gate,
-            "gate_task_specific_dim": args.gate_task_specific_dim,
+            # MoE settings (optional - only for MoE models)
+            "moe_experts": getattr(args, 'moe_experts', None),
+            "moe_top_k": getattr(args, 'moe_top_k', None),
+            "moe_mlp_ratio": getattr(args, 'moe_mlp_ratio', None),
+            "moe_gate_type": getattr(args, 'moe_gate_type', None),
+            "vmoe_noisy_std": getattr(args, 'vmoe_noisy_std', None),
+            "moe_noisy_gate_loss_weight": getattr(args, 'moe_noisy_gate_loss_weight', None),
+            "multi_gate": getattr(args, 'multi_gate', None),
+            "gate_task_specific_dim": getattr(args, 'gate_task_specific_dim', None),
 
             # Dataset and tasks
             "dataset": p['train_db_name'],
@@ -119,9 +119,9 @@ class WandbLogger:
             "num_tasks": len(p.TASKS.NAMES),
 
             # Training settings
-            "seed": args.seed,
+            "seed": getattr(args, 'seed', None),
             "world_size": getattr(args, 'world_size', 1),
-            "distributed": args.distributed,
+            "distributed": getattr(args, 'distributed', False),
         }
 
         # Update wandb config
@@ -149,6 +149,14 @@ class WandbLogger:
         # CV loss (gating loss)
         if 'gating' in losses:
             metrics["train/cv_loss"] = losses['gating'].avg
+
+        # Semregu loss
+        if 'semregu' in losses:
+            metrics["train/semregu_loss"] = losses['semregu'].avg
+
+        # Regu subimage loss
+        if 'regu_subimage' in losses:
+            metrics["train/regu_subimage_loss"] = losses['regu_subimage'].avg
 
         # Total loss
         if 'total' in losses:

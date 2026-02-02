@@ -32,6 +32,7 @@ model_kwargs:
          layer4: 512
 backbone: resnet18
 backbone_kwargs:
+   model_name: mtl_cross_stitch_resnet18
    pretrained: True
    dilated: True
 head: deeplab

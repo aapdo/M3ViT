@@ -235,7 +235,11 @@ class MultiTaskModel(nn.Module):
                     deepfeature2 = {}
             out = {}
             if single_task is not None:
-                return {single_task: F.interpolate(self.decoders[single_task](shared_representation), out_size, mode='bilinear')}, cv_losses
+                task_out = {single_task: F.interpolate(self.decoders[single_task](shared_representation), out_size, mode='bilinear')}
+                if cv_losses:
+                    return task_out, cv_losses
+                else:
+                    return task_out
             
             for task in self.tasks:
                 if self.tam and self.training:
@@ -263,7 +267,12 @@ class MultiTaskModel(nn.Module):
                     x = self.tam_model2(deepfeature2)
                     for task in self.tasks:
                         out['tam_level2_%s' %(task)] = F.interpolate(x[task], out_size, mode='bilinear', align_corners=False)
-            return out, cv_losses
+
+            # Return tuple only if cv_losses is not empty
+            if cv_losses:
+                return out, cv_losses
+            else:
+                return out
         else:
             out = {}
             total_cv_loss = x.new_tensor(0.0)
@@ -276,7 +285,8 @@ class MultiTaskModel(nn.Module):
                     deepfeature2 = {}
 
             for task in self.tasks:
-                backbone_out = self.backbone(x, task_id=self.tasks_id[task])
+                sem = None if task != 'semseg' else sem
+                backbone_out = self.backbone(x, task_id=self.tasks_id[task], sem=sem)
 
                 # Unpack backbone output
                 if isinstance(backbone_out, tuple):
@@ -311,7 +321,11 @@ class MultiTaskModel(nn.Module):
                     for task in self.tasks:
                         out['tam_level2_%s' %(task)] = F.interpolate(x[task], out_size, mode='bilinear', align_corners=False)
 
-            return out, total_cv_loss
+            # Return tuple only if total_cv_loss is not zero/empty
+            if total_cv_loss is not None and total_cv_loss.item() != 0.0:
+                return out, total_cv_loss
+            else:
+                return out
 
 class TokenMultiTaskModel(nn.Module):
     """ Multi-task baseline model with shared encoder + task-specific decoders """

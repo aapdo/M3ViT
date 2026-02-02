@@ -653,7 +653,7 @@ class VisionTransformerMoE(nn.Module):
                             idx = idx+1
         filename = 'gt_patch_{}.npy'.format(self.idx)
         self.idx=self.idx+1
-        np.save(filename, hint)
+        # np.save(filename, hint)
         return torch.tensor(hint, device=sem.device) 
 
     def forward_features(self, x, gate_inp, task_id,sem):
@@ -671,7 +671,7 @@ class VisionTransformerMoE(nn.Module):
             task_specific[task_id]=1.0
             task_specific_feature = self.gate_task_represent(task_specific)
         out = None
-        total_cv_loss = x.new_tensor(0.0)
+        total_cv_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype, requires_grad=True)
 
         for i, blk in enumerate(self.blocks):
             if blk.moe:

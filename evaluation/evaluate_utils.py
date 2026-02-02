@@ -306,23 +306,37 @@ def save_model_predictions(p, val_loader, model, args=None):
         # else:
         #     output = model(inputs)
 
-        # Unpack model output (output, cv_losses)
-        if args is not None:
+        # Unpack model output based on use_cv_loss setting
+        use_cv_loss = getattr(args, 'use_cv_loss', False) if args is not None else False
+        one_by_one = getattr(args, 'one_by_one', False) if args is not None else False
+        task_one_hot = getattr(args, 'task_one_hot', False) if args is not None else False
+
+        if args is not None and one_by_one:
             output={}
-            if args.one_by_one:
-                id=0
-                for single_task in p.TASKS.NAMES:
-                    if args.task_one_hot:
+            id=0
+            for single_task in p.TASKS.NAMES:
+                if use_cv_loss:
+                    if task_one_hot:
                         task_output, _ = model(inputs,single_task=single_task, task_id = id)
                         output.update(task_output)
                         id=id+1
                     else:
                         task_output, _ = model(inputs,single_task=single_task)
                         output.update(task_output)
-            else:
-                output, _ = model(inputs)
+                else:
+                    if task_one_hot:
+                        task_output = model(inputs,single_task=single_task, task_id = id)
+                        output.update(task_output)
+                        id=id+1
+                    else:
+                        task_output = model(inputs,single_task=single_task)
+                        output.update(task_output)
         else:
-            output, _ = model(inputs)
+            # Standard forward pass (for both args=None and one_by_one=False)
+            if use_cv_loss:
+                output, _ = model(inputs)
+            else:
+                output = model(inputs)
 
         if ii%50==0:
             print('has saved samples',ii,len(val_loader))

@@ -46,7 +46,7 @@ class NoisyGate_VMoE(BaseGate):
             from losses.loss_functions import SoftMaxwithLoss
             self.criterion = SoftMaxwithLoss()
             self.num_class = 40
-            self.head = nn.Linear(num_expert, self.num_class)
+            self.head = nn.Linear(self.tot_expert, self.num_class)
             self.semregu_loss = 0.0
         if self.regu_subimage:
             self.regu_subimage_loss = 0.0
@@ -91,17 +91,48 @@ class NoisyGate_VMoE(BaseGate):
         noise_stddev = raw_noise_stddev * self.training
 
         if self.regu_sem and (sem is not None):
-            batch = sem.shape[0]
-            prior_selection = clean_logits.reshape(batch,-1,self.num_expert)[:,1:,:]
-            prior_selection = prior_selection.reshape(-1,self.num_expert)
-            prior_out = self.head(prior_selection)
-            prior_out = prior_out.reshape(batch,sem.shape[2],sem.shape[3],self.num_class)
-            prior_out = prior_out.permute(0,3,1,2)
-            # hint = self.get_groundtruth_sem(sem)
-            semregu_loss = self.criterion(prior_out,sem)
-            # print('during forward regu loss',semregu_loss)
+            B = sem.shape[0]
+
+            # sem: (B,1,512,512) -> get_groundtruth_sem 이후 (B,1,32,32)로 들어오는 상태
+            # (혹시라도 512로 들어오면 여기서 patch GT로 한번 더 만들게 안전장치)
+            if sem.shape[2] > 64:  # 512 같은 경우
+                sem = self.get_groundtruth_sem(sem)  # (B,1,32,32) 기대
+
+            Hp, Wp = int(sem.shape[2]), int(sem.shape[3])
+            Np = Hp * Wp  # 예: 1024
+
+            # clean_logits: (B*N_tokens, tot_expert)
+            # B로 나누어 토큰 시퀀스로 복원
+            logits3d = clean_logits.reshape(B, -1, self.tot_expert)  # 예: (B, 1025, 16)
+
+            # special token 개수 자동 처리: N_tokens - Np = special token count
+            n_tokens = logits3d.shape[1]
+            n_special = n_tokens - Np
+            if n_special < 0:
+                raise RuntimeError(f"Token count smaller than patches: n_tokens={n_tokens}, Np={Np}")
+            if n_special > 2:
+                # 네 모델이 더 많은 special token을 쓰는 경우도 있을 수 있어서 경고/방어
+                # 그래도 patch 개수(Np)만큼 뒤에서 뽑아오는 방식이 가장 안전
+                pass
+
+            # patch 토큰만 추출 (앞에서 special token 제거)
+            patch_logits = logits3d[:, n_special:, :]  # (B, Np, tot_expert)
+
+            if patch_logits.shape[1] != Np:
+                raise RuntimeError(f"Patch token mismatch: patch_logits={patch_logits.shape}, expected Np={Np}")
+
+            # head 적용해서 class logits 만들기
+            prior_out = self.head(patch_logits.reshape(-1, self.tot_expert))  # (B*Np, num_class)
+            prior_out = prior_out.reshape(B, Hp, Wp, self.num_class).permute(0, 3, 1, 2).contiguous()  # (B,C,Hp,Wp)
+
+            # label은 loss가 기대하는 (B,1,H,W)를 유지해야 함 (squeeze 금지)
+            sem_t = sem.to(dtype=torch.long)  # (B,1,Hp,Wp)
+
+            # (선택) hint에 255 ignore 라벨이 있다면, loss가 ignore_index를 지원하는지 확인 필요
+            # SoftMaxwithLoss 내부가 ignore 처리를 안 하면 여기서 255 때문에 문제가 날 수 있음.
+
+            semregu_loss = self.criterion(prior_out, sem_t)
             self.semregu_loss = semregu_loss
-            # print('clean_logits',clean_logits.shape,sem.shape)
 
         if self.regu_subimage and (sem is not None):
             self.regu_subimage_loss = 0

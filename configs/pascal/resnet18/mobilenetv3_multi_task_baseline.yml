@@ -20,6 +20,7 @@ scheduler: poly
 model: baseline
 backbone: mobilenetv3
 backbone_kwargs:
+   model_name: mtl_baseline_mobilenetv3
    pretrained: True
    dilated: False
    mode: small

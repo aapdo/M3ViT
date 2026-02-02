@@ -35,6 +35,7 @@ model_kwargs:
          layer4: False
 backbone: resnet18
 backbone_kwargs:
+   model_name: mtl_mtan_resnet18
    pretrained: True
    dilated: True
 head: deeplab

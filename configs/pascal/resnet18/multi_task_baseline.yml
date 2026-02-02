@@ -20,6 +20,7 @@ scheduler: poly
 model: baseline
 backbone: resnet18
 backbone_kwargs:
+   model_name: mtl_baseline_resnet18
    pretrained: True
    dilated: True
 head: deeplab
