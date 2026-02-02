@@ -179,7 +179,7 @@ class MultiTaskModel(nn.Module):
                 self.tam_level2 = p['model_kwargs']['tam_level2']
         else:
             self.tam = False
-        
+
         print('will consider tam in model',self.tam)
         if 'multi_level' in p:
             self.multi_level = p['multi_level']
@@ -192,6 +192,13 @@ class MultiTaskModel(nn.Module):
         else:
             self.multi_gate = False
         print('will consider multi gate output in model',self.multi_gate)
+
+        # Add use_cv_loss flag
+        if 'use_cv_loss' in p:
+            self.use_cv_loss = p['use_cv_loss']
+        else:
+            self.use_cv_loss = False
+        print('will use cv_loss in model',self.use_cv_loss)
         if self.tam:
             if self.tam_level0:
                 self.tam_model0 = TamModule(p,self.tasks, 256,norm_cfg = dict(type='SyncBN', requires_grad=True))
@@ -220,7 +227,7 @@ class MultiTaskModel(nn.Module):
                     backbone_out = self.backbone(x, task_id=task_id, sem=sem)
 
             # Unpack backbone output
-            if isinstance(backbone_out, tuple):
+            if isinstance(backbone_out, tuple) and self.use_cv_loss:
                 shared_representation, cv_losses = backbone_out
             else:
                 shared_representation = backbone_out
@@ -289,7 +296,7 @@ class MultiTaskModel(nn.Module):
                 backbone_out = self.backbone(x, task_id=self.tasks_id[task], sem=sem)
 
                 # Unpack backbone output
-                if isinstance(backbone_out, tuple):
+                if isinstance(backbone_out, tuple) and self.use_cv_loss:
                     pertask_representation, task_cv_loss = backbone_out
                     total_cv_loss = task_cv_loss if total_cv_loss is None else (total_cv_loss + task_cv_loss)
                 else:
@@ -353,6 +360,13 @@ class TokenMultiTaskModel(nn.Module):
         else:
             self.multi_gate = False
         print('will consider multi gate output in model',self.multi_gate)
+
+        # Add use_cv_loss flag
+        if 'use_cv_loss' in p:
+            self.use_cv_loss = p['use_cv_loss']
+        else:
+            self.use_cv_loss = False
+        print('will use cv_loss in model',self.use_cv_loss)
         
     def forward(self, x, single_task=None, task_id = None, sem=None):
         if task_id is not None:
@@ -364,7 +378,7 @@ class TokenMultiTaskModel(nn.Module):
             backbone_out = self.backbone(x)
 
             # Unpack backbone output (task_outputs_dict, total_cv_loss)
-            if isinstance(backbone_out, tuple):
+            if isinstance(backbone_out, tuple) and self.use_cv_loss:
                 task_outputs_dict, total_cv_loss = backbone_out
             else:
                 task_outputs_dict = backbone_out

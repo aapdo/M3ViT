@@ -196,6 +196,13 @@ def create_config(env_file, exp_file, local_rank=0, args=None):
 
     if not 'multi_level' in cfg.keys():
         cfg['multi_level'] = False
+
+    # Add use_cv_loss flag from args
+    if args is not None and hasattr(args, 'use_cv_loss'):
+        cfg['use_cv_loss'] = args.use_cv_loss
+    else:
+        cfg['use_cv_loss'] = False
+
     # Determine output directory
     if cfg['setup'] == 'single_task':
         if args is not None:
