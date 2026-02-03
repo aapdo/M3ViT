@@ -9,6 +9,8 @@ import numpy as np
 import sys
 import torch
 from torch.nn.parallel import DistributedDataParallel
+from models import ckpt_custom_moe_layer, ckpt_vision_transformer_moe
+from models.gate_funs import ckpt_noisy_gate_vmoe
 from utils.config import create_config
 from utils.common_config import get_train_dataset, get_transformations,\
                                 get_val_dataset, get_train_dataloader, get_val_dataloader,\
@@ -159,6 +161,7 @@ parser.add_argument('--wandb_project', type=str, default='m3vit-training', help=
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity (team name)')
 parser.add_argument('--wandb_name', type=str, default=None, help='wandb run name')
 parser.add_argument('--use_cv_loss', default=True, type=str2bool, help='whether model returns cv_loss (default: True for training)')
+parser.add_argument('--use_checkpointing', default=True, type=str2bool, help='use gradient checkpointing version of VisionTransformer_moe (default: True)')
 
 args = parser.parse_args()
 
@@ -275,10 +278,22 @@ def main():
 
     # Monkey patch to log all class initializations
     try:
-        from models import vision_transformer_moe, custom_moe_layer, vit_up_head, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head, models as models_module
-        from models.gate_funs import noisy_gate_vmoe, noisy_gate, token_noisy_gate_vmoe
+        from models import vit_up_head, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head, models as models_module
+        from models.gate_funs import noisy_gate, token_noisy_gate_vmoe
 
-        modules_to_patch = [vision_transformer_moe, custom_moe_layer, noisy_gate_vmoe, noisy_gate, token_noisy_gate_vmoe, vit_up_head, models_module, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head]
+        if args.use_checkpointing:
+            vit_moe_module = ckpt_vision_transformer_moe
+            moe_layer_module = ckpt_custom_moe_layer
+            gate_vmoe_module = ckpt_noisy_gate_vmoe
+        else:
+            from models import origin_vision_transformer_moe
+            from models import origin_custom_moe_layer
+            from models.gate_funs import origin_noisy_gate_vmoe
+            vit_moe_module = origin_vision_transformer_moe
+            moe_layer_module = origin_custom_moe_layer
+            gate_vmoe_module = origin_noisy_gate_vmoe
+
+        modules_to_patch = [vit_moe_module, moe_layer_module, gate_vmoe_module, noisy_gate, token_noisy_gate_vmoe, vit_up_head, models_module, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head]
         original_inits = patch_and_log_initializations(modules_to_patch, args)
     except Exception as e:
         print(f"Warning: Could not patch some modules for initialization logging: {e}")

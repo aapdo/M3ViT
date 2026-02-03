@@ -16,7 +16,7 @@ from fmoe.functions import AllGather, Slice
 from fmoe.gates import NaiveGate
 
 from models.gate_funs.noisy_gate import NoisyGate
-from models.gate_funs.test_noisy_gate_vmoe import NoisyGate_VMoE
+from models.gate_funs.ckpt_noisy_gate_vmoe import NoisyGate_VMoE
 
 from pdb import set_trace
 import numpy as np
@@ -144,14 +144,15 @@ class FMoETransformerMLP(FMoE):
             if self.multi_gate:
                 self.gate = nn.ModuleList([
                     gate(d_gate, num_expert, world_size, top_k,
-                    
-                    noise_std=vmoe_noisy_std,
-                    num_experts_pertask=self.num_experts_pertask, num_tasks=self.num_tasks)
+                    return_decoupled_activation=gate_return_decoupled_activation,
+                    noise_std=vmoe_noisy_std,regu_experts_fromtask = self.regu_experts_fromtask,
+                    num_experts_pertask=self.num_experts_pertask, num_tasks=self.num_tasks,regu_sem=self.regu_sem,sem_force = self.sem_force, regu_subimage=self.regu_subimage)
                     for i in range(self.our_d_gate-self.our_d_model)])
             else:
                 self.gate = gate(d_gate, num_expert, world_size, top_k,
-                noise_std=vmoe_noisy_std,
-                num_experts_pertask = self.num_experts_pertask, num_tasks = self.num_tasks)
+                return_decoupled_activation=gate_return_decoupled_activation,
+                noise_std=vmoe_noisy_std,regu_experts_fromtask = self.regu_experts_fromtask,
+                num_experts_pertask = self.num_experts_pertask, num_tasks = self.num_tasks,regu_sem=self.regu_sem,sem_force = self.sem_force, regu_subimage=self.regu_subimage)
 
         else:
             raise ValueError("No such gating type")
@@ -211,7 +212,8 @@ class FMoETransformerMLP(FMoE):
 
         if (task_id is not None) and self.multi_gate:
             # print('in custom moe_layer,task_id',task_id)
-            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp)
+            # (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp)
+            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp, sem=sem)
         else:
             (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate(gate_inp, task_id=task_id,sem=sem)
 
@@ -227,7 +229,13 @@ class FMoETransformerMLP(FMoE):
                 for i in range(sem.shape[-1]):
                     for j in range(len(self.force_id)):
                         if sem[k,i] in self.force_id[j]:
-                            gate_top_k_idx[k,i+1,:]=[j*2,j*2+1]
+                            # Create expert indices for this group
+                            expert_indices = [j*2, j*2+1]
+                            # Pad or truncate to match top_k
+                            if self.top_k > 2:
+                                # Repeat the pattern to fill top_k slots
+                                expert_indices = (expert_indices * ((self.top_k + 1) // 2))[:self.top_k]
+                            gate_top_k_idx[k,i+1,:] = torch.tensor(expert_indices, device=gate_top_k_idx.device, dtype=gate_top_k_idx.dtype)
             gate_top_k_idx = gate_top_k_idx.reshape(-1,self.top_k)
             gate_score =  torch.ones((gate_score.shape[0],self.top_k),device=gate_score.device)*0.5
 

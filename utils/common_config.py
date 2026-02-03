@@ -166,7 +166,10 @@ def get_backbone(p, args=None):
         linear_keyword = 'head'
     
     elif p['backbone'] == 'VisionTransformer_moe':
-        from models.vision_transformer_moe import VisionTransformerMoE
+        if args.use_checkpointing:
+            from models.ckpt_vision_transformer_moe import VisionTransformerMoE
+        else:
+            from models.origin_vision_transformer_moe import VisionTransformerMoE
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         bn_args = p['backbone_kwargs']
         if args.moe_data_distributed:

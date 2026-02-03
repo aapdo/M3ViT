@@ -16,7 +16,7 @@ from timm.layers  import lecun_normal_
 import numpy as np
 from collections import Counter
 from models.gate_funs.noisy_gate import NoisyGate
-from models.gate_funs.noisy_gate_vmoe import NoisyGate_VMoE
+from models.gate_funs.ckpt_noisy_gate_vmoe import NoisyGate_VMoE
 from models.gate_funs.token_noisy_gate_vmoe import TokenNoisyGate_VMoE
 from torch.utils.checkpoint import checkpoint
 
