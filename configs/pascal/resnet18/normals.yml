@@ -28,3 +28,6 @@ head: deeplab
 # Tasks
 task_dictionary:
    include_normals: True
+
+eval_final_10_epochs_only: True
+eval_interval: 10

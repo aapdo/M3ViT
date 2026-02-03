@@ -57,3 +57,6 @@ loss_kwargs:
        sal: 5.0
        edge: 50.0
        normals: 10.0
+
+eval_final_10_epochs_only: True
+eval_interval: 10

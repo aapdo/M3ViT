@@ -29,3 +29,6 @@ head: deeplab
 task_dictionary:
    include_edge: True
    edge_w: 0.95
+
+eval_final_10_epochs_only: True
+eval_interval: 10

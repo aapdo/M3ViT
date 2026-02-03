@@ -178,13 +178,17 @@ def main():
 
         # Evaluate
             # Check if need to perform eval first
-        if 'eval_final_10_epochs_only' in p.keys() and p['eval_final_10_epochs_only']: # To speed up -> Avoid eval every epoch, and only test during final 10 epochs.
+        eval_interval = p.get('eval_interval', 1)
+        if 'eval_final_10_epochs_only' in p.keys() and p['eval_final_10_epochs_only']:
+            # Eval every eval_interval epochs, and always during final 10 epochs
             if epoch + 1 > p['epochs'] - 10:
+                eval_bool = True
+            elif (epoch + 1) % eval_interval == 0:
                 eval_bool = True
             else:
                 eval_bool = False
         else:
-            eval_bool = True
+            eval_bool = (epoch + 1) % eval_interval == 0
 
         # Perform evaluation
         if eval_bool:
