@@ -548,16 +548,13 @@ class VisionTransformerMoE(nn.Module):
             task_specific = torch.zeros(self.num_tasks,device=x.device)
             task_specific[task_id]=1.0
             task_specific_feature = self.gate_task_represent(task_specific)
-        outs = []
         
         for i, blk in enumerate(self.blocks):
             if blk.moe:
                 x=blk(x, gate_inp, task_id, task_specific_feature,sem=sem)
             else:
                 x = blk(x)
-            if i in self.out_indices:
-                outs.append(x)
-        return tuple(outs)
+        return x
 
     def forward(self, x, gate_inp=None, task_id=None,sem=None):
         if sem is not None and (self.regu_sem or self.sem_force):
