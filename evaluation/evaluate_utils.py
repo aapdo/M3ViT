@@ -345,12 +345,16 @@ def save_model_predictions(p, val_loader, model, args=None):
             for jj in range(int(inputs.size()[0])):
                 if len(sample[task][jj].unique()) == 1 and sample[task][jj].unique() == 255:
                     continue
-                fname = meta['image'][jj]               
+                fname = meta['image'][jj]
                 result = cv2.resize(output_task[jj], dsize=(int(meta['im_size'][1][jj]),int(meta['im_size'][0][jj])), interpolation=p.TASKS.INFER_FLAGVALS[task])
                 if task == 'depth':
-                    sio.savemat(os.path.join(save_dirs[task], fname + '.mat'), {'depth': result})
+                    out_path = os.path.join(save_dirs[task], fname + '.mat')
+                    mkdir_if_missing(os.path.dirname(out_path))
+                    sio.savemat(out_path, {'depth': result})
                 else:
-                    imageio.imwrite(os.path.join(save_dirs[task], fname + '.png'), result.astype(np.uint8))
+                    out_path = os.path.join(save_dirs[task], fname + '.png')
+                    mkdir_if_missing(os.path.dirname(out_path))
+                    imageio.imwrite(out_path, result.astype(np.uint8))
 
 
 def eval_all_results(p):
