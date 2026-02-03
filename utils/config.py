@@ -203,6 +203,12 @@ def create_config(env_file, exp_file, local_rank=0, args=None):
     else:
         cfg['use_cv_loss'] = False
 
+    # Add use_checkpointing flag from args
+    if args is not None and hasattr(args, 'use_checkpointing'):
+        cfg['use_checkpointing'] = args.use_checkpointing
+    else:
+        cfg['use_checkpointing'] = False
+
     # Determine output directory
     if cfg['setup'] == 'single_task':
         if args is not None:

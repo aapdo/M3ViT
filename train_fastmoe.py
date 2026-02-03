@@ -261,6 +261,8 @@ def main():
     print(colored('Set CuDNN benchmark', 'blue')) 
     torch.backends.cudnn.benchmark = True
 
+    # NOTE: currently all ranks use the same seed. For per-GPU randomness,
+    # consider using args.seed + dist.get_rank() (dist is already initialized above).
     if args.seed is not None:
         print(f'Set random seed to {args.seed}, deterministic: '
                     f'{args.deterministic}')

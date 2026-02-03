@@ -199,6 +199,10 @@ class MultiTaskModel(nn.Module):
         else:
             self.use_cv_loss = False
         print('will use cv_loss in model',self.use_cv_loss)
+
+        # ckpt backbone always returns (out, cv_losses) tuple
+        self.use_checkpointing = p.get('use_checkpointing', False)
+
         if self.tam:
             if self.tam_level0:
                 self.tam_model0 = TamModule(p,self.tasks, 256,norm_cfg = dict(type='SyncBN', requires_grad=True))
@@ -227,7 +231,7 @@ class MultiTaskModel(nn.Module):
                     backbone_out = self.backbone(x, task_id=task_id, sem=sem)
 
             # Unpack backbone output
-            if isinstance(backbone_out, tuple) and self.use_cv_loss:
+            if isinstance(backbone_out, tuple) and self.use_cv_loss and self.use_checkpointing:
                 shared_representation, cv_losses = backbone_out
             else:
                 shared_representation = backbone_out
@@ -296,7 +300,7 @@ class MultiTaskModel(nn.Module):
                 backbone_out = self.backbone(x, task_id=self.tasks_id[task], sem=sem)
 
                 # Unpack backbone output
-                if isinstance(backbone_out, tuple) and self.use_cv_loss:
+                if isinstance(backbone_out, tuple) and self.use_cv_loss and self.use_checkpointing:
                     pertask_representation, task_cv_loss = backbone_out
                     total_cv_loss = task_cv_loss if total_cv_loss is None else (total_cv_loss + task_cv_loss)
                 else:
@@ -367,7 +371,10 @@ class TokenMultiTaskModel(nn.Module):
         else:
             self.use_cv_loss = False
         print('will use cv_loss in model',self.use_cv_loss)
-        
+
+        # ckpt backbone always returns (out, cv_losses) tuple
+        self.use_checkpointing = p.get('use_checkpointing', False)
+
     def forward(self, x, single_task=None, task_id = None, sem=None):
         if task_id is not None:
             assert self.tasks_id[single_task]==task_id
@@ -378,7 +385,7 @@ class TokenMultiTaskModel(nn.Module):
             backbone_out = self.backbone(x)
 
             # Unpack backbone output (task_outputs_dict, total_cv_loss)
-            if isinstance(backbone_out, tuple) and self.use_cv_loss:
+            if isinstance(backbone_out, tuple) and self.use_cv_loss and self.use_checkpointing:
                 task_outputs_dict, total_cv_loss = backbone_out
             else:
                 task_outputs_dict = backbone_out
