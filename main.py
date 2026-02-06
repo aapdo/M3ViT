@@ -135,11 +135,14 @@ def main():
     wandb_logger = WandbLogger(enabled=args.use_wandb)
     if wandb_logger.enabled:
         # Auto-generate run name in KST (UTC+9) if not explicitly provided
-        wandb_run_name = args.wandb_name
-        if wandb_run_name is None:
-            from datetime import datetime, timezone, timedelta
-            kst = timezone(timedelta(hours=9))
-            wandb_run_name = datetime.now(kst).strftime("%Y%m%d_%H%M")
+        from datetime import datetime, timezone, timedelta
+        kst = timezone(timedelta(hours=9))
+        timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M")
+
+        if args.wandb_name is None:
+            wandb_run_name = timestamp
+        else:
+            wandb_run_name = f"{args.wandb_name}_{timestamp}"
 
         wandb_logger.init(
             project=args.wandb_project,
