@@ -314,6 +314,9 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
             # state_dict['blocks.1.mlp.experts.h4toh.weight']=state_dict['blocks.1.mlp.fc2.weight']
             # state_dict['blocks.1.mlp.experts.h4toh.bias']=state_dict['blocks.1.mlp.fc2.bias']
 
+    state_dict = _inject_moe_expert_from_deit_mlp(state_dict, model)
+
+
     msg = model.load_state_dict(state_dict, strict=strict)
     print('============load model weights from============',cfg['url'], msg)
 
@@ -329,3 +332,50 @@ def get_dist_info():
         rank = 0
         world_size = 1
     return rank, world_size
+
+def _inject_moe_expert_from_deit_mlp(state_dict, model):
+    """
+    DeiT의 dense MLP(fc1/fc2)를 MoE experts(FMoELinear)로 복제 초기화.
+    - fc1 -> experts.htoh4
+    - fc2 -> experts.h4toh
+    """
+    # model.blocks는 nn.Sequential이고, blk.moe True인 것만 처리
+    for i, blk in enumerate(model.blocks):
+        if not getattr(blk, "moe", False):
+            continue
+
+        # DeiT MLP key
+        k_fc1_w = f"blocks.{i}.mlp.fc1.weight"
+        k_fc1_b = f"blocks.{i}.mlp.fc1.bias"
+        k_fc2_w = f"blocks.{i}.mlp.fc2.weight"
+        k_fc2_b = f"blocks.{i}.mlp.fc2.bias"
+
+        if k_fc1_w not in state_dict or k_fc2_w not in state_dict:
+            print(f"[WARN] DeiT MLP keys missing for block {i}, skip upcycle")
+            continue
+
+        fc1_w = state_dict[k_fc1_w]  # [d_hidden, d_model]
+        fc1_b = state_dict[k_fc1_b]  # [d_hidden]
+        fc2_w = state_dict[k_fc2_w]  # [d_model, d_hidden]
+        fc2_b = state_dict[k_fc2_b]  # [d_model]
+
+        # local expert count (한 GPU/프로세스가 들고 있는 expert 수)
+        # blk.mlp.num_expert 가 있으면 그걸 쓰고, 없으면 model.moe_experts 사용
+        if hasattr(blk.mlp, "num_expert"):
+            E = blk.mlp.num_expert
+        else:
+            E = getattr(model, "moe_experts", 1)
+
+        # MoE expert keys
+        k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"  # 기대 shape [E, d_hidden, d_model]
+        k_e1_b = f"blocks.{i}.mlp.experts.htoh4.bias"    # 기대 shape [E, d_hidden]
+        k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"  # 기대 shape [E, d_model, d_hidden]
+        k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"    # 기대 shape [E, d_model]
+
+        # E개 expert로 복제
+        state_dict[k_e1_w] = fc1_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
+        state_dict[k_e1_b] = fc1_b.unsqueeze(0).repeat(E, 1).contiguous()
+        state_dict[k_e2_w] = fc2_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
+        state_dict[k_e2_b] = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
+
+    return state_dict
