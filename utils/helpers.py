@@ -301,6 +301,7 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
         state_dict['pos_embed'] = torch.cat(
             (cls_token_weight, pos_embed_weight), dim=1)
         # print(f"[Pretrained] after interp vit_state_dict['pos_embed'] (flattened): {state_dict['pos_embed'].flatten().tolist()}")
+
     check = False
     if check:
         for i in [1,3,5,7,9,11]:
@@ -333,13 +334,16 @@ def get_dist_info():
         world_size = 1
     return rank, world_size
 
-def _inject_moe_expert_from_deit_mlp(state_dict, model):
+def _inject_moe_expert_from_deit_mlp(state_dict, model, *, verbose=True, verify_shape=True, sample_blocks=(1,)):
     """
-    DeiT의 dense MLP(fc1/fc2)를 MoE experts(FMoELinear)로 복제 초기화.
-    - fc1 -> experts.htoh4
-    - fc2 -> experts.h4toh
+    DeiT dense MLP(fc1/fc2) -> MoE experts(FMoELinear) 복제 초기화.
+    로깅:
+      - fc1/fc2 shape
+      - 생성된 expert weight/bias shape
+      - 모델 파라미터가 기대하는 shape과 일치 여부
     """
-    # model.blocks는 nn.Sequential이고, blk.moe True인 것만 처리
+    model_sd = model.state_dict()
+
     for i, blk in enumerate(model.blocks):
         if not getattr(blk, "moe", False):
             continue
@@ -351,31 +355,54 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model):
         k_fc2_b = f"blocks.{i}.mlp.fc2.bias"
 
         if k_fc1_w not in state_dict or k_fc2_w not in state_dict:
-            print(f"[WARN] DeiT MLP keys missing for block {i}, skip upcycle")
+            if verbose:
+                print(f"[INJECT][SKIP] block {i}: DeiT MLP keys missing")
             continue
 
-        fc1_w = state_dict[k_fc1_w]  # [d_hidden, d_model]
-        fc1_b = state_dict[k_fc1_b]  # [d_hidden]
-        fc2_w = state_dict[k_fc2_w]  # [d_model, d_hidden]
-        fc2_b = state_dict[k_fc2_b]  # [d_model]
+        fc1_w = state_dict[k_fc1_w]
+        fc1_b = state_dict[k_fc1_b]
+        fc2_w = state_dict[k_fc2_w]
+        fc2_b = state_dict[k_fc2_b]
 
-        # local expert count (한 GPU/프로세스가 들고 있는 expert 수)
-        # blk.mlp.num_expert 가 있으면 그걸 쓰고, 없으면 model.moe_experts 사용
-        if hasattr(blk.mlp, "num_expert"):
-            E = blk.mlp.num_expert
-        else:
-            E = getattr(model, "moe_experts", 1)
+        # local expert count
+        E = getattr(blk.mlp, "num_expert", getattr(model, "moe_experts", 1))
 
-        # MoE expert keys
-        k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"  # 기대 shape [E, d_hidden, d_model]
-        k_e1_b = f"blocks.{i}.mlp.experts.htoh4.bias"    # 기대 shape [E, d_hidden]
-        k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"  # 기대 shape [E, d_model, d_hidden]
-        k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"    # 기대 shape [E, d_model]
+        # MoE expert keys (FMoELinear 기반)
+        k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"
+        k_e1_b = f"blocks.{i}.mlp.experts.htoh4.bias"
+        k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"
+        k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"
 
-        # E개 expert로 복제
-        state_dict[k_e1_w] = fc1_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
-        state_dict[k_e1_b] = fc1_b.unsqueeze(0).repeat(E, 1).contiguous()
-        state_dict[k_e2_w] = fc2_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
-        state_dict[k_e2_b] = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
+        # 생성
+        e1_w = fc1_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
+        e1_b = fc1_b.unsqueeze(0).repeat(E, 1).contiguous()
+        e2_w = fc2_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
+        e2_b = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
+
+        state_dict[k_e1_w] = e1_w
+        state_dict[k_e1_b] = e1_b
+        state_dict[k_e2_w] = e2_w
+        state_dict[k_e2_b] = e2_b
+
+        # ---- logging / shape verify ----
+        if verbose and (i in sample_blocks):
+            print(f"[INJECT] block {i}: E={E}")
+            print(f"  DeiT fc1_w {tuple(fc1_w.shape)}  -> experts.htoh4.w {tuple(e1_w.shape)}")
+            print(f"  DeiT fc1_b {tuple(fc1_b.shape)}  -> experts.htoh4.b {tuple(e1_b.shape)}")
+            print(f"  DeiT fc2_w {tuple(fc2_w.shape)}  -> experts.h4toh.w {tuple(e2_w.shape)}")
+            print(f"  DeiT fc2_b {tuple(fc2_b.shape)}  -> experts.h4toh.b {tuple(e2_b.shape)}")
+
+            if verify_shape:
+                # 모델이 기대하는 shape과 비교
+                for kk, vv in [(k_e1_w, e1_w), (k_e1_b, e1_b), (k_e2_w, e2_w), (k_e2_b, e2_b)]:
+                    if kk not in model_sd:
+                        print(f"  [WARN] model has no key: {kk}")
+                        continue
+                    exp_shape = tuple(model_sd[kk].shape)
+                    got_shape = tuple(vv.shape)
+                    if exp_shape != got_shape:
+                        print(f"  [SHAPE MISMATCH] {kk}: model expects {exp_shape}, injected {got_shape}")
+                    else:
+                        print(f"  [OK] {kk}: shape {got_shape} matches model")
 
     return state_dict
