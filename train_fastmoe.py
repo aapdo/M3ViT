@@ -507,6 +507,27 @@ def main():
     # Main loop
     print(colored('Starting main loop', 'blue'))
 
+    # Initial evaluation before training
+    if start_epoch == 0:
+        print(colored('Initial evaluation before training', 'blue'))
+        print('Evaluate ...')
+        # Temporarily disable forward hooks during evaluation
+        if args.forward_hook and hasattr(args, 'batch_counter'):
+            args.batch_counter['enabled'] = False
+
+        save_model_predictions(p, val_dataloader, model, args)
+        if args.distributed:
+            torch.distributed.barrier()
+        curr_result = eval_all_results(p)
+
+        # Re-enable forward hooks after evaluation
+        if args.forward_hook and hasattr(args, 'batch_counter'):
+            args.batch_counter['enabled'] = True
+
+        print(colored('Initial evaluation complete', 'blue'))
+        if args.distributed:
+            torch.distributed.barrier()
+
     for epoch in range(start_epoch, p['epochs']):
         print(colored('Epoch %d/%d' %(epoch+1, p['epochs']), 'yellow'))
         print(colored('-'*10, 'yellow'))

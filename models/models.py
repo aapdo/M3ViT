@@ -202,6 +202,7 @@ class MultiTaskModel(nn.Module):
 
         # ckpt backbone always returns (out, cv_losses) tuple
         self.use_checkpointing = p.get('use_checkpointing', False)
+        print('will use checkpointing in model',self.use_checkpointing)
 
         if self.tam:
             if self.tam_level0:
@@ -286,7 +287,7 @@ class MultiTaskModel(nn.Module):
                 return out
         else:
             out = {}
-            total_cv_loss = x.new_tensor(0.0)
+            total_cv_loss = None
             if self.tam:
                 if self.tam_level0:
                     deepfeature0 = {}
@@ -332,8 +333,10 @@ class MultiTaskModel(nn.Module):
                     for task in self.tasks:
                         out['tam_level2_%s' %(task)] = F.interpolate(x[task], out_size, mode='bilinear', align_corners=False)
 
-            # Return tuple only if total_cv_loss is not zero/empty
-            if total_cv_loss is not None and total_cv_loss.item() != 0.0:
+            # Return tuple if cv_loss is enabled and checkpointing is used
+            if self.use_cv_loss and self.use_checkpointing:
+                if total_cv_loss is None:
+                    total_cv_loss = x.new_tensor(0.0, requires_grad=True)
                 return out, total_cv_loss
             else:
                 return out
@@ -374,6 +377,7 @@ class TokenMultiTaskModel(nn.Module):
 
         # ckpt backbone always returns (out, cv_losses) tuple
         self.use_checkpointing = p.get('use_checkpointing', False)
+        print('will use checkpointing in model',self.use_checkpointing)
 
     def forward(self, x, single_task=None, task_id = None, sem=None):
         if task_id is not None:
