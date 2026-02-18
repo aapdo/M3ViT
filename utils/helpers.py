@@ -340,14 +340,39 @@ def get_dist_info():
         world_size = 1
     return rank, world_size
 
-def _inject_moe_expert_from_deit_mlp(state_dict, model, cfg, *, verbose=True, verify_shape=True, sample_blocks=(1,)):
+import torch
+
+def _inject_moe_expert_from_deit_mlp(
+    state_dict,
+    model,
+    cfg,
+    *,
+    verbose=True,
+    verify_shape=True,
+    sample_blocks=(1,),
+):
+    """
+    DeiT dense MLP(fc1/fc2) -> MoE experts(FMoELinear) 초기화 (EP 환경: local experts 기준)
+
+    - moe_mlp_ratio=4 (기본): fc1/fc2를 local_experts 개수만큼 그대로 복사.
+    - moe_mlp_ratio=1:
+        * DeiT MLP를 group_size(=4)로 분할(granularity=4)해서 '그룹 템플릿'을 만들고
+        * local_experts가 group_size의 배수라면 그룹 반복으로 채움
+        * local_experts가 group_size보다 작으면 앞에서부터 잘라서 사용
+      (GELU + softmax-then-topk 전제하에 공식 scaling 적용)
+    """
     model_sd = model.state_dict()
-    moe_mlp_ratio = getattr(model, "moe_mlp_ratio", 4.0)
+    moe_mlp_ratio = float(getattr(model, "moe_mlp_ratio", 4.0))
+
+    # cfg에서 top-k 가져오기
+    topk = int(getattr(cfg, "moe_top_k", 4))
+    moe_router_pre_softmax = True  # 너는 softmax-then-topk 사용
 
     for i, blk in enumerate(model.blocks):
         if not getattr(blk, "moe", False):
             continue
 
+        # DeiT MLP key
         k_fc1_w = f"blocks.{i}.mlp.fc1.weight"
         k_fc1_b = f"blocks.{i}.mlp.fc1.bias"
         k_fc2_w = f"blocks.{i}.mlp.fc2.weight"
@@ -358,77 +383,109 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model, cfg, *, verbose=True, ve
                 print(f"[INJECT][SKIP] block {i}: DeiT MLP keys missing")
             continue
 
-        fc1_w = state_dict[k_fc1_w]
-        fc1_b = state_dict[k_fc1_b]
-        fc2_w = state_dict[k_fc2_w]
-        fc2_b = state_dict[k_fc2_b]
+        fc1_w = state_dict[k_fc1_w]  # [hidden, embed]
+        fc1_b = state_dict[k_fc1_b]  # [hidden]
+        fc2_w = state_dict[k_fc2_w]  # [embed, hidden]
+        fc2_b = state_dict[k_fc2_b]  # [embed]
 
-        E = getattr(blk.mlp, "num_expert", getattr(model, "moe_experts", 1))
-        assert E == 16, f"block {i}: expected total num_expert=16 (E4G4), but got {E}"
+        # local expert count (EP 환경에서 이 값이 8로 나오는 게 정상)
+        E_local = int(getattr(blk.mlp, "num_expert", getattr(model, "moe_experts", 1)))
 
+        # MoE expert keys (FMoELinear 기반)
         k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"
         k_e1_b = f"blocks.{i}.mlp.experts.htoh4.bias"
         k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"
         k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"
 
-        if moe_mlp_ratio == 1 or moe_mlp_ratio == 1.0:
-            group_size = 4
-            assert E % group_size == 0
-            num_groups = E // group_size
+        if moe_mlp_ratio == 1.0:
+            # ---------------------------
+            # moe_mlp_ratio=1 : 분할 upcycling + 공식 scaling
+            # ---------------------------
+            group_size = 4  # granularity
+            granularity = group_size
 
             hidden_dim = fc1_w.shape[0]
-            assert hidden_dim % group_size == 0
+            assert hidden_dim % granularity == 0, (
+                f"block {i}: hidden_dim={hidden_dim} must be divisible by granularity={granularity}"
+            )
 
-            # ---- official-style scaling (GELU + pre-softmax) ----
-            granularity = group_size
-            expansion_rate = E // granularity
-            topk = int(getattr(cfg, "moe_top_k", 4))
-            moe_router_pre_softmax = True
+            # 전역 관점에서 expansion_rate는 (total_experts / granularity)이지만,
+            # 로컬 only 초기화에서는 total_experts를 정확히 모르거나 DP/TP와 섞일 수 있음.
+            # 실용적으로는 "전역 total"을 cfg에서 받아오되, 없으면 local 기준으로 fallback.
+            total_experts = int(getattr(cfg, "moe_experts", getattr(cfg, "tot_experts", E_local)))
+            # total_experts가 전역(16)이라면 expansion_rate=16/4=4
+            # 만약 cfg에 없어서 local(8)으로 fallback되면 expansion_rate=8/4=2
+            assert total_experts % granularity == 0, (
+                f"block {i}: total_experts={total_experts} must be divisible by granularity={granularity}"
+            )
+            expansion_rate = total_experts // granularity
 
+            # ---- 공식 activation scale (pre-softmax) ----
             if moe_router_pre_softmax:
                 moe_activation_scale = (expansion_rate * granularity * granularity) / float(topk)
             else:
                 moe_activation_scale = float(granularity)
 
-            weight_scale = moe_activation_scale ** 0.5  # GELU => sqrt
+            # GELU => sqrt
+            weight_scale = moe_activation_scale ** 0.5
 
+            # 1) scale dense weights
             fc1_w_scaled = fc1_w * weight_scale
             fc2_w_scaled = fc2_w * weight_scale
+            fc1_b_scaled = fc1_b * weight_scale
 
-            fc1_w_chunks = fc1_w_scaled.chunk(granularity, dim=0)
-            fc2_w_chunks = fc2_w_scaled.chunk(granularity, dim=1)
+            # 2) split into granularity chunks
+            fc1_w_chunks = fc1_w_scaled.chunk(granularity, dim=0)  # 4 chunks: [hidden/4, embed]
+            fc2_w_chunks = fc2_w_scaled.chunk(granularity, dim=1)  # 4 chunks: [embed, hidden/4]
+            fc1_b_chunks = fc1_b_scaled.chunk(granularity, dim=0)  # 4 chunks: [hidden/4]
 
+            # 3) multiply each chunk by expansion_rate (official behavior)
             fc1_w_chunks = [c * expansion_rate for c in fc1_w_chunks]
             fc2_w_chunks = [c * expansion_rate for c in fc2_w_chunks]
-
-            fc1_b_scaled = fc1_b * weight_scale
-            fc1_b_chunks = fc1_b_scaled.chunk(granularity, dim=0)
             fc1_b_chunks = [b * expansion_rate for b in fc1_b_chunks]
 
-            # fc2 bias: official-style repeat to [E, embed]
-            e2_b = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
+            # ---- build a template group of 4 experts ----
+            template_e1_w = torch.stack(fc1_w_chunks, dim=0)  # [4, hidden/4, embed]
+            template_e1_b = torch.stack(fc1_b_chunks, dim=0)  # [4, hidden/4]
+            template_e2_w = torch.stack(fc2_w_chunks, dim=0)  # [4, embed, hidden/4]
 
-            one_group_e1_w = torch.stack(fc1_w_chunks, dim=0)
-            one_group_e1_b = torch.stack(fc1_b_chunks, dim=0)
-            one_group_e2_w = torch.stack(fc2_w_chunks, dim=0)
+            # fc2 bias: official-style => repeat per expert
+            # local shape should be [E_local, embed]
+            template_e2_b = fc2_b.unsqueeze(0).repeat(granularity, 1)  # [4, embed]
 
-            e1_w = one_group_e1_w.repeat(num_groups, 1, 1).contiguous()
-            e1_b = one_group_e1_b.repeat(num_groups, 1).contiguous()
-            e2_w = one_group_e2_w.repeat(num_groups, 1, 1).contiguous()
+            # ---- fill local experts ----
+            # local_experts가 4의 배수면 repeat로 채우고, 아니면 앞에서부터 잘라서 채움
+            if E_local % granularity == 0:
+                reps = E_local // granularity
+                e1_w = template_e1_w.repeat(reps, 1, 1).contiguous()  # [E_local, hidden/4, embed]
+                e1_b = template_e1_b.repeat(reps, 1).contiguous()     # [E_local, hidden/4]
+                e2_w = template_e2_w.repeat(reps, 1, 1).contiguous()  # [E_local, embed, hidden/4]
+                e2_b = template_e2_b.repeat(reps, 1).contiguous()     # [E_local, embed]
+            else:
+                # 예: E_local=6 같은 이상 케이스 방어
+                e1_w = template_e1_w[:E_local].contiguous()
+                e1_b = template_e1_b[:E_local].contiguous()
+                e2_w = template_e2_w[:E_local].contiguous()
+                e2_b = fc2_b.unsqueeze(0).repeat(E_local, 1).contiguous()
 
         else:
-            e1_w = fc1_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
-            e1_b = fc1_b.unsqueeze(0).repeat(E, 1).contiguous()
-            e2_w = fc2_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
-            e2_b = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
+            # ---------------------------
+            # moe_mlp_ratio=4 : local experts만큼 단순 복사
+            # ---------------------------
+            e1_w = fc1_w.unsqueeze(0).repeat(E_local, 1, 1).contiguous()
+            e1_b = fc1_b.unsqueeze(0).repeat(E_local, 1).contiguous()
+            e2_w = fc2_w.unsqueeze(0).repeat(E_local, 1, 1).contiguous()
+            e2_b = fc2_b.unsqueeze(0).repeat(E_local, 1).contiguous()
 
+        # 항상 state_dict에 기록
         state_dict[k_e1_w] = e1_w
         state_dict[k_e1_b] = e1_b
         state_dict[k_e2_w] = e2_w
         state_dict[k_e2_b] = e2_b
 
+        # ---- logging / shape verify ----
         if verbose and (i in sample_blocks):
-            print(f"[INJECT] block {i}: E={E}, moe_mlp_ratio={moe_mlp_ratio}")
+            print(f"[INJECT] block {i}: E_local={E_local}, moe_mlp_ratio={moe_mlp_ratio}, topk={topk}")
             print(f"  DeiT fc1_w {tuple(fc1_w.shape)}  -> experts.htoh4.w {tuple(e1_w.shape)}")
             print(f"  DeiT fc1_b {tuple(fc1_b.shape)}  -> experts.htoh4.b {tuple(e1_b.shape)}")
             print(f"  DeiT fc2_w {tuple(fc2_w.shape)}  -> experts.h4toh.w {tuple(e2_w.shape)}")
@@ -439,10 +496,12 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model, cfg, *, verbose=True, ve
                     if kk not in model_sd:
                         print(f"  [WARN] model has no key: {kk}")
                         continue
-                    if tuple(model_sd[kk].shape) != tuple(vv.shape):
-                        print(f"  [SHAPE MISMATCH] {kk}: model expects {tuple(model_sd[kk].shape)}, injected {tuple(vv.shape)}")
+                    exp_shape = tuple(model_sd[kk].shape)
+                    got_shape = tuple(vv.shape)
+                    if exp_shape != got_shape:
+                        print(f"  [SHAPE MISMATCH] {kk}: model expects {exp_shape}, injected {got_shape}")
                     else:
-                        print(f"  [OK] {kk}: shape {tuple(vv.shape)} matches model")
+                        print(f"  [OK] {kk}: shape {got_shape} matches model")
 
     return state_dict
 
