@@ -6,6 +6,7 @@
 # 
 # License: Attribution-NonCommercial 4.0 International
 from collections import OrderedDict
+from xml.parsers.expat import model
 import torch
 import cv2
 import numpy as np
@@ -315,9 +316,14 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
             # state_dict['blocks.1.mlp.experts.h4toh.weight']=state_dict['blocks.1.mlp.fc2.weight']
             # state_dict['blocks.1.mlp.experts.h4toh.bias']=state_dict['blocks.1.mlp.fc2.bias']
 
-    state_dict = _inject_moe_expert_from_deit_mlp(state_dict, model)
+    state_dict = _inject_moe_expert_from_deit_mlp(state_dict, model, cfg)
 
-
+    if cfg.get('use_virtual_group_initialization', False):
+        state_dict = _inject_virtual_group_init_for_gates(
+            state_dict, model,
+            tot_experts=16, group_size=4,
+            init="normal", std=0.02
+        )
     msg = model.load_state_dict(state_dict, strict=strict)
     print('============load model weights from============',cfg['url'], msg)
 
@@ -334,15 +340,19 @@ def get_dist_info():
         world_size = 1
     return rank, world_size
 
-def _inject_moe_expert_from_deit_mlp(state_dict, model, *, verbose=True, verify_shape=True, sample_blocks=(1,)):
+def _inject_moe_expert_from_deit_mlp(state_dict, model, cfg, *, verbose=True, verify_shape=True, sample_blocks=(1,)):
     """
     DeiT dense MLP(fc1/fc2) -> MoE experts(FMoELinear) 복제 초기화.
-    로깅:
-      - fc1/fc2 shape
-      - 생성된 expert weight/bias shape
-      - 모델 파라미터가 기대하는 shape과 일치 여부
+
+    moe_mlp_ratio=4 (기본): fc1/fc2를 E개 그대로 복사.
+    moe_mlp_ratio=1: DeiT MLP를 4등분해 4개를 한 그룹으로 만들고 E/4 그룹 반복.
+      - fc1_w [hidden, embed] -> row 4등분 -> 각 expert [hidden/4, embed]
+      - fc1_b [hidden]        -> 4등분      -> 각 expert [hidden/4]
+      - fc2_w [embed, hidden] -> col 4등분  -> 각 expert [embed, hidden/4]
+      - fc2_b [embed]         -> 값 /4, 차원 유지 -> 각 expert [embed]
     """
     model_sd = model.state_dict()
+    moe_mlp_ratio = getattr(model, "moe_mlp_ratio", 4.0)
 
     for i, blk in enumerate(model.blocks):
         if not getattr(blk, "moe", False):
@@ -366,6 +376,7 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model, *, verbose=True, verify_
 
         # local expert count
         E = getattr(blk.mlp, "num_expert", getattr(model, "moe_experts", 1))
+        assert E == 16, f"block {i}: expected total num_expert=16 (E4G4), but got {E}"
 
         # MoE expert keys (FMoELinear 기반)
         k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"
@@ -373,11 +384,78 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model, *, verbose=True, verify_
         k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"
         k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"
 
-        # 생성
-        e1_w = fc1_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
-        e1_b = fc1_b.unsqueeze(0).repeat(E, 1).contiguous()
-        e2_w = fc2_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
-        e2_b = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
+    if moe_mlp_ratio == 1 or moe_mlp_ratio == 1.0:
+        # DeiT MLP을 4등분해 4개 expert를 한 그룹으로 구성
+        group_size = 4
+        assert E % group_size == 0, (
+            f"block {i}: num_expert={E} must be divisible by {group_size} when moe_mlp_ratio=1"
+        )
+        num_groups = E // group_size  # e.g. 4 when E=16
+
+        hidden_dim = fc1_w.shape[0]  # e.g. 1536
+        assert hidden_dim % group_size == 0, (
+            f"block {i}: hidden_dim={hidden_dim} must be divisible by {group_size}"
+        )
+
+        # ---------------------------
+        # Official-style weight scaling (for GELU + softmax-then-topk)
+        # ---------------------------
+        granularity = group_size                 # G
+        expansion_rate = E // granularity        # E/G
+        topk = int(getattr(cfg, "moe_top_k", 4)) # T (from cfg)
+        moe_router_pre_softmax = True            # you want softmax-then-topk
+
+        if moe_router_pre_softmax:
+            moe_activation_scale = (expansion_rate * granularity * granularity) / float(topk)
+        else:
+            moe_activation_scale = float(granularity)
+
+        # GELU => sqrt
+        weight_scale = moe_activation_scale ** 0.5
+
+        # 1) scale dense weights first
+        fc1_w_scaled = fc1_w * weight_scale
+        fc2_w_scaled = fc2_w * weight_scale
+
+        # 2) split into granularity chunks
+        fc1_w_chunks = fc1_w_scaled.chunk(granularity, dim=0)  # each [hidden/4, embed]
+        fc2_w_chunks = fc2_w_scaled.chunk(granularity, dim=1)  # each [embed, hidden/4]
+
+        # 3) multiply each chunk by expansion_rate (official code does this)
+        fc1_w_chunks = [c * expansion_rate for c in fc1_w_chunks]
+        fc2_w_chunks = [c * expansion_rate for c in fc2_w_chunks]
+
+        # ---------------------------
+        # Bias handling (match official intent)
+        # ---------------------------
+        # fc1 bias: 공식 구현은 weight 처리와 같은 함수로 처리하려는 의도(완전한 테스트는 없다고 주석).
+        # 여기서는 weight와 동일하게 scale + chunk + expansion_rate 적용 (일관성 유지).
+        fc1_b_scaled = fc1_b * weight_scale
+        fc1_b_chunks = fc1_b_scaled.chunk(granularity, dim=0)  # each [hidden/4]
+        fc1_b_chunks = [b * expansion_rate for b in fc1_b_chunks]
+
+        # fc2 bias: 공식 구현은 "repeat(granularity * expansion_rate, 1)" (SequentialMLP 기준)
+        # 우리의 tensor는 [embed_dim] 이므로, 최종 [E, embed_dim] 형태로 그대로 복제
+        fc2_b_rep = fc2_b.unsqueeze(0).repeat(E, 1)  # [E, embed]
+
+        # ---------------------------
+        # Build one group (4 experts) then repeat groups
+        # ---------------------------
+        one_group_e1_w = torch.stack(fc1_w_chunks, dim=0)  # [4, hidden/4, embed]
+        one_group_e1_b = torch.stack(fc1_b_chunks, dim=0)  # [4, hidden/4]
+        one_group_e2_w = torch.stack(fc2_w_chunks, dim=0)  # [4, embed, hidden/4]
+
+        e1_w = one_group_e1_w.repeat(num_groups, 1, 1).contiguous()  # [E, hidden/4, embed]
+        e1_b = one_group_e1_b.repeat(num_groups, 1).contiguous()     # [E, hidden/4]
+        e2_w = one_group_e2_w.repeat(num_groups, 1, 1).contiguous()  # [E, embed, hidden/4]
+        e2_b = fc2_b_rep.contiguous()                                # [E, embed]
+
+        else:
+            # moe_mlp_ratio=4 기본: fc1/fc2 그대로 E개 복사
+            e1_w = fc1_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
+            e1_b = fc1_b.unsqueeze(0).repeat(E, 1).contiguous()
+            e2_w = fc2_w.unsqueeze(0).repeat(E, 1, 1).contiguous()
+            e2_b = fc2_b.unsqueeze(0).repeat(E, 1).contiguous()
 
         state_dict[k_e1_w] = e1_w
         state_dict[k_e1_b] = e1_b
@@ -386,14 +464,13 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model, *, verbose=True, verify_
 
         # ---- logging / shape verify ----
         if verbose and (i in sample_blocks):
-            print(f"[INJECT] block {i}: E={E}")
+            print(f"[INJECT] block {i}: E={E}, moe_mlp_ratio={moe_mlp_ratio}")
             print(f"  DeiT fc1_w {tuple(fc1_w.shape)}  -> experts.htoh4.w {tuple(e1_w.shape)}")
             print(f"  DeiT fc1_b {tuple(fc1_b.shape)}  -> experts.htoh4.b {tuple(e1_b.shape)}")
             print(f"  DeiT fc2_w {tuple(fc2_w.shape)}  -> experts.h4toh.w {tuple(e2_w.shape)}")
             print(f"  DeiT fc2_b {tuple(fc2_b.shape)}  -> experts.h4toh.b {tuple(e2_b.shape)}")
 
             if verify_shape:
-                # 모델이 기대하는 shape과 비교
                 for kk, vv in [(k_e1_w, e1_w), (k_e1_b, e1_b), (k_e2_w, e2_w), (k_e2_b, e2_b)]:
                     if kk not in model_sd:
                         print(f"  [WARN] model has no key: {kk}")
@@ -404,5 +481,66 @@ def _inject_moe_expert_from_deit_mlp(state_dict, model, *, verbose=True, verify_
                         print(f"  [SHAPE MISMATCH] {kk}: model expects {exp_shape}, injected {got_shape}")
                     else:
                         print(f"  [OK] {kk}: shape {got_shape} matches model")
+
+    return state_dict
+
+def _inject_virtual_group_init_for_gates(
+    state_dict, model,
+    *,
+    tot_experts=16,
+    group_size=4,
+    init="normal",  # 이제 의미가 생김: "normal"만 지원(원하면 "keep_ref"도 추가 가능)
+    std=0.02,       # Megatron default init_method_std
+    verbose=True,
+    sample_blocks=(1,)
+):
+    model_sd = model.state_dict()
+    assert tot_experts % group_size == 0
+    num_groups = tot_experts // group_size  # e.g. 4
+
+    def build_grouped_w_gate(ref: torch.Tensor) -> torch.Tensor:
+        """
+        1) Re-init router weights with Normal(0, std) (Megatron-like)
+        2) Virtual group init: take first group columns and replicate to all groups
+        """
+        assert ref.ndim == 2, ref.shape
+        d_model, n = ref.shape
+        assert n == tot_experts, f"expected {tot_experts}, got {n}"
+        assert tot_experts % group_size == 0
+        assert num_groups == (tot_experts // group_size)
+
+        # ---- Step A: re-init (ignore ref values) ----
+        W = torch.empty((d_model, tot_experts), device=ref.device, dtype=ref.dtype)
+
+        if init == "normal":
+            torch.nn.init.normal_(W, mean=0.0, std=std)
+        else:
+            raise ValueError(f"Unsupported init={init}. Use init='normal' for Megatron-like init.")
+
+        # ---- Step B: virtual-group init (Megatron upcycling style) ----
+        # Split by expert dimension (columns) into num_groups chunks, each [d_model, group_size]
+        chunks = torch.tensor_split(W, num_groups, dim=1)
+        proto = chunks[0]  # first group
+        W_grouped = torch.cat([proto for _ in range(num_groups)], dim=1).contiguous()
+
+        return W_grouped
+
+    gate_keys = [k for k in model_sd.keys()
+                 if re.search(r"^blocks\.\d+\.mlp\.gate\.\d+\.w_gate$", k)]
+
+    if not gate_keys:
+        raise KeyError("No gate w_gate keys matched pattern blocks.{i}.mlp.gate.{j}.w_gate")
+
+    for k in gate_keys:
+        # ref only used for shape/device/dtype
+        ref = state_dict.get(k, model_sd[k])
+        new_w = build_grouped_w_gate(ref).cpu()
+        state_dict[k] = new_w
+
+        if verbose:
+            m = re.search(r"^blocks\.(\d+)\.", k)
+            blk_id = int(m.group(1)) if m else None
+            if blk_id in sample_blocks:
+                print(f"[VGI] {k} <- Normal(0,{std}) then grouped-replica {tuple(new_w.shape)}")
 
     return state_dict

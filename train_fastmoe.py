@@ -162,6 +162,8 @@ parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity
 parser.add_argument('--wandb_name', type=str, default=None, help='wandb run name')
 parser.add_argument('--use_cv_loss', default=True, type=str2bool, help='whether model returns cv_loss (default: True for training)')
 parser.add_argument('--use_checkpointing', default=True, type=str2bool, help='use gradient checkpointing version of VisionTransformer_moe (default: True)')
+parser.add_argument('--use_weight_scaling', default=False, type=str2bool, help='whether to scale weights when initializing MoE experts from DeiT MLP')
+parser.add_argument('--use_virtual_group_initialization', default=False, type=str2bool, help='whether to use virtual group initialization for MoE experts (split DeiT MLP into groups)')
 
 args = parser.parse_args()
 
@@ -198,6 +200,8 @@ def main():
         p['backbone_kwargs']['random_init']=args.backbone_random_init
     if args.moe_mlp_ratio is not None:
         p['backbone_kwargs']['moe_mlp_ratio']=args.moe_mlp_ratio
+    p['backbone_kwargs']['use_weight_scaling'] = args.use_weight_scaling
+    p['backbone_kwargs']['use_virtual_group_initialization'] = args.use_virtual_group_initialization
     if args.moe_top_k is not None:
         p['backbone_kwargs']['moe_top_k']=args.moe_top_k
     if args.trBatch is not None:
