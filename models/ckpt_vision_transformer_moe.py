@@ -511,6 +511,7 @@ class VisionTransformerMoE(nn.Module):
         act_layer = act_layer or nn.GELU
         self.norm_layer = norm_layer
         self.moe_experts = moe_experts
+        self.moe_mlp_ratio = moe_mlp_ratio
         self.moe_top_k = moe_top_k
         self.gate_return_decoupled_activation = gate_return_decoupled_activation
         self.multi_gate = multi_gate

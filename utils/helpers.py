@@ -363,6 +363,9 @@ def _inject_moe_expert_from_deit_mlp(
     """
     model_sd = model.state_dict()
     moe_mlp_ratio = float(getattr(model, "moe_mlp_ratio", 4.0))
+    # moe_mlp_ratio=-1 means "use mlp_ratio" (same as dense MLP)
+    if moe_mlp_ratio < 0:
+        moe_mlp_ratio = float(getattr(model, "mlp_ratio", 4.0))
 
     # cfg에서 top-k 가져오기
     topk = int(getattr(cfg, "moe_top_k", 4))
