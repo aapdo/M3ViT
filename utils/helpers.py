@@ -368,8 +368,14 @@ def _inject_moe_expert_from_deit_mlp(
     topk = int(getattr(cfg, "moe_top_k", 4))
     moe_router_pre_softmax = True  # 너는 softmax-then-topk 사용
 
+    if verbose:
+        print(f"[INJECT] === _inject_moe_expert_from_deit_mlp START ===")
+        print(f"[INJECT] moe_mlp_ratio={moe_mlp_ratio}, topk={topk}, moe_router_pre_softmax={moe_router_pre_softmax}")
+
     for i, blk in enumerate(model.blocks):
         if not getattr(blk, "moe", False):
+            if verbose:
+                print(f"[INJECT][SKIP] block {i}: not a MoE block")
             continue
 
         # DeiT MLP key
@@ -380,8 +386,12 @@ def _inject_moe_expert_from_deit_mlp(
 
         if k_fc1_w not in state_dict or k_fc2_w not in state_dict:
             if verbose:
-                print(f"[INJECT][SKIP] block {i}: DeiT MLP keys missing")
+                missing = [k for k in [k_fc1_w, k_fc1_b, k_fc2_w, k_fc2_b] if k not in state_dict]
+                print(f"[INJECT][SKIP] block {i}: DeiT MLP keys missing: {missing}")
             continue
+
+        if verbose:
+            print(f"[INJECT] block {i}: MoE block found, E_local will be determined next")
 
         fc1_w = state_dict[k_fc1_w]  # [hidden, embed]
         fc1_b = state_dict[k_fc1_b]  # [hidden]
@@ -390,6 +400,8 @@ def _inject_moe_expert_from_deit_mlp(
 
         # local expert count (EP 환경에서 이 값이 8로 나오는 게 정상)
         E_local = int(getattr(blk.mlp, "num_expert", getattr(model, "moe_experts", 1)))
+        if verbose:
+            print(f"[INJECT] block {i}: E_local={E_local}, fc1_w={tuple(fc1_w.shape)}, fc2_w={tuple(fc2_w.shape)}")
 
         # MoE expert keys (FMoELinear 기반)
         k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"
@@ -397,10 +409,12 @@ def _inject_moe_expert_from_deit_mlp(
         k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"
         k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"
 
-        if moe_mlp_ratio == 1.0:
+        if moe_mlp_ratio == 1.0 or moe_mlp_ratio == 1:
             # ---------------------------
             # moe_mlp_ratio=1 : 분할 upcycling + 공식 scaling
             # ---------------------------
+            if verbose:
+                print(f"[INJECT] block {i}: moe_mlp_ratio=1 path (split upcycling)")
             group_size = 4  # granularity
             granularity = group_size
 
@@ -419,6 +433,8 @@ def _inject_moe_expert_from_deit_mlp(
                 f"block {i}: total_experts={total_experts} must be divisible by granularity={granularity}"
             )
             expansion_rate = total_experts // granularity
+            if verbose:
+                print(f"[INJECT] block {i}: hidden_dim={hidden_dim}, granularity={granularity}, total_experts={total_experts}, expansion_rate={expansion_rate}")
 
             # ---- 공식 activation scale (pre-softmax) ----
             if moe_router_pre_softmax:
@@ -428,6 +444,8 @@ def _inject_moe_expert_from_deit_mlp(
 
             # GELU => sqrt
             weight_scale = moe_activation_scale ** 0.5
+            if verbose:
+                print(f"[INJECT] block {i}: moe_activation_scale={moe_activation_scale:.4f}, weight_scale={weight_scale:.4f}")
 
             # 1) scale dense weights
             fc1_w_scaled = fc1_w * weight_scale
@@ -457,12 +475,16 @@ def _inject_moe_expert_from_deit_mlp(
             # local_experts가 4의 배수면 repeat로 채우고, 아니면 앞에서부터 잘라서 채움
             if E_local % granularity == 0:
                 reps = E_local // granularity
+                if verbose:
+                    print(f"[INJECT] block {i}: E_local={E_local} divisible by granularity={granularity}, reps={reps} (repeat mode)")
                 e1_w = template_e1_w.repeat(reps, 1, 1).contiguous()  # [E_local, hidden/4, embed]
                 e1_b = template_e1_b.repeat(reps, 1).contiguous()     # [E_local, hidden/4]
                 e2_w = template_e2_w.repeat(reps, 1, 1).contiguous()  # [E_local, embed, hidden/4]
                 e2_b = template_e2_b.repeat(reps, 1).contiguous()     # [E_local, embed]
             else:
                 # 예: E_local=6 같은 이상 케이스 방어
+                if verbose:
+                    print(f"[INJECT] block {i}: E_local={E_local} NOT divisible by granularity={granularity}, using truncate mode")
                 e1_w = template_e1_w[:E_local].contiguous()
                 e1_b = template_e1_b[:E_local].contiguous()
                 e2_w = template_e2_w[:E_local].contiguous()
@@ -472,6 +494,8 @@ def _inject_moe_expert_from_deit_mlp(
             # ---------------------------
             # moe_mlp_ratio=4 : local experts만큼 단순 복사
             # ---------------------------
+            if verbose:
+                print(f"[INJECT] block {i}: moe_mlp_ratio={moe_mlp_ratio} path (simple copy, E_local={E_local})")
             e1_w = fc1_w.unsqueeze(0).repeat(E_local, 1, 1).contiguous()
             e1_b = fc1_b.unsqueeze(0).repeat(E_local, 1).contiguous()
             e2_w = fc2_w.unsqueeze(0).repeat(E_local, 1, 1).contiguous()
@@ -485,6 +509,7 @@ def _inject_moe_expert_from_deit_mlp(
 
         # ---- logging / shape verify ----
         if verbose and (i in sample_blocks):
+            print(f"[INJECT] --- block {i} summary (sample_blocks) ---")
             print(f"[INJECT] block {i}: E_local={E_local}, moe_mlp_ratio={moe_mlp_ratio}, topk={topk}")
             print(f"  DeiT fc1_w {tuple(fc1_w.shape)}  -> experts.htoh4.w {tuple(e1_w.shape)}")
             print(f"  DeiT fc1_b {tuple(fc1_b.shape)}  -> experts.htoh4.b {tuple(e1_b.shape)}")
@@ -502,6 +527,9 @@ def _inject_moe_expert_from_deit_mlp(
                         print(f"  [SHAPE MISMATCH] {kk}: model expects {exp_shape}, injected {got_shape}")
                     else:
                         print(f"  [OK] {kk}: shape {got_shape} matches model")
+
+    if verbose:
+        print(f"[INJECT] === _inject_moe_expert_from_deit_mlp DONE ===")
 
     return state_dict
 
