@@ -550,6 +550,10 @@ def _inject_virtual_group_init_for_gates(
     assert tot_experts % group_size == 0
     num_groups = tot_experts // group_size  # e.g. 4
 
+    if verbose:
+        print(f"[VGI] === _inject_virtual_group_init_for_gates START ===")
+        print(f"[VGI] tot_experts={tot_experts}, group_size={group_size}, num_groups={num_groups}, init={init}, std={std}")
+
     def build_grouped_w_gate(ref: torch.Tensor) -> torch.Tensor:
         """
         1) Re-init router weights with Normal(0, std) (Megatron-like)
@@ -583,9 +587,13 @@ def _inject_virtual_group_init_for_gates(
     if not gate_keys:
         raise KeyError("No gate w_gate keys matched pattern blocks.{i}.mlp.gate.{j}.w_gate")
 
+    if verbose:
+        print(f"[VGI] found {len(gate_keys)} gate keys to initialize")
+
     for k in gate_keys:
         # ref only used for shape/device/dtype
         ref = state_dict.get(k, model_sd[k])
+        ref_src = "state_dict" if k in state_dict else "model_sd (fresh)"
         new_w = build_grouped_w_gate(ref).cpu()
         state_dict[k] = new_w
 
@@ -593,6 +601,13 @@ def _inject_virtual_group_init_for_gates(
             m = re.search(r"^blocks\.(\d+)\.", k)
             blk_id = int(m.group(1)) if m else None
             if blk_id in sample_blocks:
-                print(f"[VGI] {k} <- Normal(0,{std}) then grouped-replica {tuple(new_w.shape)}")
+                print(f"[VGI] {k}: ref_src={ref_src}, ref_shape={tuple(ref.shape)} -> new_shape={tuple(new_w.shape)}")
+                print(f"[VGI]   Normal(0,{std}) then grouped-replica (num_groups={num_groups})")
+                print(f"[VGI]   new_w stats: mean={new_w.mean():.5f}, std={new_w.std():.5f}, min={new_w.min():.5f}, max={new_w.max():.5f}")
+            else:
+                print(f"[VGI] {k} <- initialized {tuple(new_w.shape)}")
+
+    if verbose:
+        print(f"[VGI] === _inject_virtual_group_init_for_gates DONE ===")
 
     return state_dict
