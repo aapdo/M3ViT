@@ -15,7 +15,7 @@ from pdb import set_trace
 class NoisyGate_VMoE(BaseGate):
     def __init__(self, d_model, num_expert, world_size, top_k=2, noise_std=1, no_noise=False,
                  return_decoupled_activation=False,regu_experts_fromtask=False,num_experts_pertask=-1,num_tasks=-1,
-                 regu_sem=False,sem_force = False,regu_subimage=False):
+                 regu_sem=False,sem_force = False,regu_subimage=False, group_size=4):
         super().__init__(num_expert, world_size)
         self.w_gate = nn.Parameter(
             torch.zeros(d_model, self.tot_expert), requires_grad=True
@@ -30,6 +30,7 @@ class NoisyGate_VMoE(BaseGate):
         self.top_k = top_k
         self.no_noise = no_noise
         self.noise_std = noise_std
+        self.group_size = group_size
 
         self.softmax = nn.Softmax(1)
 
@@ -203,6 +204,48 @@ class NoisyGate_VMoE(BaseGate):
 
         zeros = torch.zeros_like(logits, requires_grad=True)
         gates = zeros.scatter(1, top_k_indices, top_k_logits)
+
+        # -----------------------------
+        # (ADD) wandb analysis logging (gate-only)
+        # -----------------------------
+        assert self.tot_expert % self.group_size == 0
+        try:
+            from utils.wandb_logger import get_wandb_logger
+            logger = get_wandb_logger()
+        except Exception:
+            logger = None
+
+        # rank0만 로깅(DDP 중복 방지)
+        do_log = (logger is not None)
+        if do_log:
+            try:
+                import torch.distributed as dist
+                if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+                    do_log = False
+            except Exception:
+                pass
+
+        if do_log:
+            with torch.no_grad():
+                # Entropy: -sum p log p
+                p = logits.clamp_min(1e-9)              # [T, E]
+                ent = -(p * p.log()).sum(dim=1)         # [T]
+                pmax = p.max(dim=1).values              # [T]
+
+                # top-k가 속한 그룹 개수: group_id = expert_id // group_size
+                group_ids = top_k_indices // int(self.group_size)    # [T, K]
+                sorted_g, _ = torch.sort(group_ids, dim=1)
+                group_cnt = (sorted_g[:, 1:] != sorted_g[:, :-1]).sum(dim=1) + 1  # [T]
+
+                metrics = {
+                    "analysis/gate_entropy_mean": float(ent.mean().item()),
+                    "analysis/gate_pmax_mean": float(pmax.mean().item()),
+                    "analysis/topk_group_count_mean": float(group_cnt.float().mean().item()),
+                }
+
+            logger.log(metrics)
+
+        # -----------------------------
 
         # self.activation = logits.reshape(other_dim + [-1,]).contiguous()
 
