@@ -12,7 +12,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from utils.custom_collate import collate_mil
 
-from .helpers import get_dist_info
+from .helpers import get_dist_info, set_upcycling_runtime_options
 from torch.utils.data import DataLoader
 from .sampler import (
     DistributedGroupSampler,
@@ -120,6 +120,7 @@ def cvt_state_dict_moe_gate(state_dict, model, p, args, linear_keyword):
 
 def get_backbone(p, args=None):
     """ Return the backbone """
+    set_upcycling_runtime_options(None)
 
     if p['backbone'] == 'resnet18':
         from models.resnet import resnet18
@@ -179,6 +180,15 @@ def get_backbone(p, args=None):
             if args.moe_experts % moe_world_size != 0:
                 print("experts number of {} is not divisible by world size of {}".format(args.moe_experts, moe_world_size))
             args.moe_experts = args.moe_experts // moe_world_size
+        set_upcycling_runtime_options({
+            "use_virtual_group_initialization": bool(getattr(args, "use_virtual_group_initialization", False)),
+            "use_weight_scaling": bool(getattr(args, "use_weight_scaling", False)),
+            "moe_top_k": bn_args.get("moe_top_k", None),
+            "moe_experts_local": int(args.moe_experts),
+            "moe_world_size": int(moe_world_size),
+            "tot_experts": int(args.moe_experts) * int(moe_world_size),
+            "moe_experts": int(args.moe_experts) * int(moe_world_size),
+        })
         if args.moe_use_gate:
             gate_model = vits_gate.__dict__[args.moe_gate_arch](num_classes=0)
             backbone = VisionTransformerMoE(model_name=bn_args['model_name'],\
@@ -215,6 +225,15 @@ def get_backbone(p, args=None):
             if args.moe_experts % moe_world_size != 0:
                 print("experts number of {} is not divisible by world size of {}".format(args.moe_experts, moe_world_size))
             args.moe_experts = args.moe_experts // moe_world_size
+        set_upcycling_runtime_options({
+            "use_virtual_group_initialization": bool(getattr(args, "use_virtual_group_initialization", False)),
+            "use_weight_scaling": bool(getattr(args, "use_weight_scaling", False)),
+            "moe_top_k": bn_args.get("moe_top_k", None),
+            "moe_experts_local": int(args.moe_experts),
+            "moe_world_size": int(moe_world_size),
+            "tot_experts": int(args.moe_experts) * int(moe_world_size),
+            "moe_experts": int(args.moe_experts) * int(moe_world_size),
+        })
         if args.moe_use_gate:
             gate_model = vits_gate.__dict__[args.moe_gate_arch](num_classes=0)
             backbone = TokenVisionTransformerMoE(model_name=bn_args['model_name'],\
