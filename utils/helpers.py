@@ -118,6 +118,54 @@ def ind2sub(array_shape, inds):
 
 HASH_REGEX = re.compile(r'-([a-f0-9]*)\.')
 _logger = logging.getLogger(__name__)
+_UPCYCLING_RUNTIME_OPTIONS = {}
+
+
+def set_upcycling_runtime_options(options=None):
+    """Inject runtime options (from train args) for upcycling in load_pretrained."""
+    global _UPCYCLING_RUNTIME_OPTIONS
+    if options is None:
+        _UPCYCLING_RUNTIME_OPTIONS = {}
+    else:
+        _UPCYCLING_RUNTIME_OPTIONS = dict(options)
+
+
+def _as_cfg_dict(cfg):
+    if cfg is None:
+        return None
+    if isinstance(cfg, dict):
+        return dict(cfg)
+    try:
+        return dict(cfg)
+    except Exception:
+        out = {}
+        for k in dir(cfg):
+            if k.startswith('_'):
+                continue
+            v = getattr(cfg, k)
+            if not callable(v):
+                out[k] = v
+        return out
+
+
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _merge_cfg_with_runtime_options(cfg):
+    merged = _as_cfg_dict(cfg)
+    if merged is None:
+        return None
+    if not _UPCYCLING_RUNTIME_OPTIONS:
+        return merged
+    for k, v in _UPCYCLING_RUNTIME_OPTIONS.items():
+        if v is not None:
+            merged[k] = v
+    return merged
 
 
 def load_state_dict_from_url(url, model_dir=None, file_name=None, check_hash=False, progress=True, map_location=None):
@@ -208,6 +256,7 @@ def load_pretrained_pos_emb(model, cfg=None, num_classes=1000, in_chans=3, filte
 def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=None, strict=True, pos_embed_interp=False, num_patches=576, align_corners=False, img_h=None, img_w=None):
     if cfg is None:
         cfg = getattr(model, 'default_cfg')
+    cfg = _merge_cfg_with_runtime_options(cfg)
     if cfg is None or 'url' not in cfg or not cfg['url']:
         _logger.warning(
             "Pretrained model URL is invalid, using random initialization.")
@@ -321,7 +370,7 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
     if cfg.get('use_virtual_group_initialization', False):
         state_dict = _inject_virtual_group_init_for_gates(
             state_dict, model,
-            tot_experts=16, group_size=4,
+            cfg=cfg,
             init="normal", std=0.02
         )
     msg = model.load_state_dict(state_dict, strict=strict)
@@ -356,9 +405,9 @@ def _inject_moe_expert_from_deit_mlp(
 
     - moe_mlp_ratio=4 (기본): fc1/fc2를 local_experts 개수만큼 그대로 복사.
     - moe_mlp_ratio=1:
-        * DeiT MLP를 group_size(=4)로 분할(granularity=4)해서 '그룹 템플릿'을 만들고
-        * local_experts가 group_size의 배수라면 그룹 반복으로 채움
-        * local_experts가 group_size보다 작으면 앞에서부터 잘라서 사용
+        * DeiT MLP를 granularity(G)로 분할해 '그룹 템플릿' 생성
+        * local_experts가 G의 배수라면 그룹 반복으로 채움
+        * local_experts가 G보다 작으면 앞에서부터 잘라서 사용
       (GELU + softmax-then-topk 전제하에 공식 scaling 적용)
     """
     model_sd = model.state_dict()
@@ -367,13 +416,16 @@ def _inject_moe_expert_from_deit_mlp(
     if moe_mlp_ratio < 0:
         moe_mlp_ratio = float(getattr(model, "mlp_ratio", 4.0))
 
-    # cfg에서 top-k 가져오기
-    topk = int(getattr(cfg, "moe_top_k", 4))
+    default_topk = int(_cfg_get(cfg, "moe_top_k", getattr(model, "moe_top_k", 4)))
+    use_weight_scaling = bool(_cfg_get(cfg, "use_weight_scaling", False))
     moe_router_pre_softmax = True  # 너는 softmax-then-topk 사용
 
     if verbose:
         print(f"[INJECT] === _inject_moe_expert_from_deit_mlp START ===")
-        print(f"[INJECT] moe_mlp_ratio={moe_mlp_ratio}, topk={topk}, moe_router_pre_softmax={moe_router_pre_softmax}")
+        print(
+            f"[INJECT] moe_mlp_ratio={moe_mlp_ratio}, default_topk={default_topk}, "
+            f"use_weight_scaling={use_weight_scaling}, moe_router_pre_softmax={moe_router_pre_softmax}"
+        )
 
     for i, blk in enumerate(model.blocks):
         if not getattr(blk, "moe", False):
@@ -403,8 +455,35 @@ def _inject_moe_expert_from_deit_mlp(
 
         # local expert count (EP 환경에서 이 값이 8로 나오는 게 정상)
         E_local = int(getattr(blk.mlp, "num_expert", getattr(model, "moe_experts", 1)))
+        block_topk = int(getattr(blk, "moe_top_k", default_topk))
+        block_world_size = int(
+            getattr(
+                blk,
+                "world_size",
+                getattr(blk.mlp, "world_size", _cfg_get(cfg, "moe_world_size", 1)),
+            )
+        )
+        if block_world_size < 1:
+            block_world_size = 1
+        total_experts = int(
+            getattr(
+                blk,
+                "tot_expert",
+                _cfg_get(
+                    cfg,
+                    "tot_experts",
+                    _cfg_get(cfg, "moe_experts", E_local * block_world_size),
+                ),
+            )
+        )
+        if total_experts <= 0:
+            total_experts = E_local * block_world_size
         if verbose:
-            print(f"[INJECT] block {i}: E_local={E_local}, fc1_w={tuple(fc1_w.shape)}, fc2_w={tuple(fc2_w.shape)}")
+            print(
+                f"[INJECT] block {i}: E_local={E_local}, total_experts={total_experts}, "
+                f"world_size={block_world_size}, topk={block_topk}, "
+                f"fc1_w={tuple(fc1_w.shape)}, fc2_w={tuple(fc2_w.shape)}"
+            )
 
         # MoE expert keys (FMoELinear 기반)
         k_e1_w = f"blocks.{i}.mlp.experts.htoh4.weight"
@@ -414,41 +493,44 @@ def _inject_moe_expert_from_deit_mlp(
 
         if moe_mlp_ratio == 1.0 or moe_mlp_ratio == 1:
             # ---------------------------
-            # moe_mlp_ratio=1 : 분할 upcycling + 공식 scaling
+            # moe_mlp_ratio=1 : 분할 upcycling (+ optional GELU scaling)
             # ---------------------------
             if verbose:
                 print(f"[INJECT] block {i}: moe_mlp_ratio=1 path (split upcycling)")
-            group_size = 4  # granularity
-            granularity = group_size
 
             hidden_dim = fc1_w.shape[0]
-            assert hidden_dim % granularity == 0, (
-                f"block {i}: hidden_dim={hidden_dim} must be divisible by granularity={granularity}"
+            expected_e1_w = model_sd.get(k_e1_w, None)
+            if expected_e1_w is not None and expected_e1_w.ndim == 3:
+                expert_hidden_dim = int(expected_e1_w.shape[1])
+                granularity = hidden_dim // expert_hidden_dim
+            else:
+                granularity = 4
+            assert granularity > 0 and hidden_dim % granularity == 0, (
+                f"block {i}: invalid granularity={granularity} for hidden_dim={hidden_dim}"
             )
-
-            # 전역 관점에서 expansion_rate는 (total_experts / granularity)이지만,
-            # 로컬 only 초기화에서는 total_experts를 정확히 모르거나 DP/TP와 섞일 수 있음.
-            # 실용적으로는 "전역 total"을 cfg에서 받아오되, 없으면 local 기준으로 fallback.
-            total_experts = int(getattr(cfg, "moe_experts", getattr(cfg, "tot_experts", E_local)))
-            # total_experts가 전역(16)이라면 expansion_rate=16/4=4
-            # 만약 cfg에 없어서 local(8)으로 fallback되면 expansion_rate=8/4=2
             assert total_experts % granularity == 0, (
                 f"block {i}: total_experts={total_experts} must be divisible by granularity={granularity}"
             )
-            expansion_rate = total_experts // granularity
+            expansion_rate = total_experts // granularity  # E in sqrt(E*G^2/T)
             if verbose:
-                print(f"[INJECT] block {i}: hidden_dim={hidden_dim}, granularity={granularity}, total_experts={total_experts}, expansion_rate={expansion_rate}")
+                print(
+                    f"[INJECT] block {i}: hidden_dim={hidden_dim}, granularity={granularity}, "
+                    f"total_experts={total_experts}, expansion_rate={expansion_rate}"
+                )
 
-            # ---- 공식 activation scale (pre-softmax) ----
-            if moe_router_pre_softmax:
-                moe_activation_scale = (expansion_rate * granularity * granularity) / float(topk)
+            # GELU 기준 scaling: sqrt(E*G^2/T)
+            # NOTE: 2025 Eq.2는 squared-ReLU 기반이라 GELU에 그대로 적용하지 않음.
+            if use_weight_scaling and moe_router_pre_softmax:
+                moe_activation_scale = (expansion_rate * granularity * granularity) / float(max(block_topk, 1))
+                weight_scale = moe_activation_scale ** 0.5
             else:
-                moe_activation_scale = float(granularity)
-
-            # GELU => sqrt
-            weight_scale = moe_activation_scale ** 0.5
+                moe_activation_scale = 1.0
+                weight_scale = 1.0
             if verbose:
-                print(f"[INJECT] block {i}: moe_activation_scale={moe_activation_scale:.4f}, weight_scale={weight_scale:.4f}")
+                print(
+                    f"[INJECT] block {i}: moe_activation_scale={moe_activation_scale:.4f}, "
+                    f"weight_scale={weight_scale:.4f}"
+                )
 
             # 1) scale dense weights
             fc1_w_scaled = fc1_w * weight_scale
@@ -460,19 +542,14 @@ def _inject_moe_expert_from_deit_mlp(
             fc2_w_chunks = fc2_w_scaled.chunk(granularity, dim=1)  # 4 chunks: [embed, hidden/4]
             fc1_b_chunks = fc1_b_scaled.chunk(granularity, dim=0)  # 4 chunks: [hidden/4]
 
-            # 3) multiply each chunk by expansion_rate (official behavior)
-            fc1_w_chunks = [c * expansion_rate for c in fc1_w_chunks]
-            fc2_w_chunks = [c * expansion_rate for c in fc2_w_chunks]
-            fc1_b_chunks = [b * expansion_rate for b in fc1_b_chunks]
-
-            # ---- build a template group of 4 experts ----
-            template_e1_w = torch.stack(fc1_w_chunks, dim=0)  # [4, hidden/4, embed]
-            template_e1_b = torch.stack(fc1_b_chunks, dim=0)  # [4, hidden/4]
-            template_e2_w = torch.stack(fc2_w_chunks, dim=0)  # [4, embed, hidden/4]
+            # ---- build a template group of granularity experts ----
+            template_e1_w = torch.stack(fc1_w_chunks, dim=0)  # [G, hidden/G, embed]
+            template_e1_b = torch.stack(fc1_b_chunks, dim=0)  # [G, hidden/G]
+            template_e2_w = torch.stack(fc2_w_chunks, dim=0)  # [G, embed, hidden/G]
 
             # fc2 bias: official-style => repeat per expert
             # local shape should be [E_local, embed]
-            template_e2_b = fc2_b.unsqueeze(0).repeat(granularity, 1)  # [4, embed]
+            template_e2_b = fc2_b.unsqueeze(0).repeat(granularity, 1)  # [G, embed]
 
             # ---- fill local experts ----
             # local_experts가 4의 배수면 repeat로 채우고, 아니면 앞에서부터 잘라서 채움
@@ -513,7 +590,7 @@ def _inject_moe_expert_from_deit_mlp(
         # ---- logging / shape verify ----
         if verbose and (i in sample_blocks):
             print(f"[INJECT] --- block {i} summary (sample_blocks) ---")
-            print(f"[INJECT] block {i}: E_local={E_local}, moe_mlp_ratio={moe_mlp_ratio}, topk={topk}")
+            print(f"[INJECT] block {i}: E_local={E_local}, moe_mlp_ratio={moe_mlp_ratio}, topk={block_topk}")
             print(f"  DeiT fc1_w {tuple(fc1_w.shape)}  -> experts.htoh4.w {tuple(e1_w.shape)}")
             print(f"  DeiT fc1_b {tuple(fc1_b.shape)}  -> experts.htoh4.b {tuple(e1_b.shape)}")
             print(f"  DeiT fc2_w {tuple(fc2_w.shape)}  -> experts.h4toh.w {tuple(e2_w.shape)}")
@@ -536,76 +613,154 @@ def _inject_moe_expert_from_deit_mlp(
 
     return state_dict
 
+def _auto_virtual_group_size(
+    tot_experts,
+    *,
+    local_experts=None,
+    world_size=None,
+    dense_hidden=None,
+    expert_hidden=None,
+):
+    tot_experts = int(tot_experts)
+    if tot_experts <= 0:
+        return 1
+
+    primary = None
+    if (
+        dense_hidden is not None
+        and expert_hidden is not None
+        and expert_hidden > 0
+        and dense_hidden % expert_hidden == 0
+    ):
+        primary = int(dense_hidden // expert_hidden)
+
+    if primary is None or primary <= 0:
+        if local_experts is not None and int(local_experts) > 0:
+            primary = int(local_experts)
+        elif world_size is not None and int(world_size) > 0 and tot_experts % int(world_size) == 0:
+            primary = int(tot_experts // int(world_size))
+        else:
+            primary = 1
+
+    g = int(primary)
+    if local_experts is not None and int(local_experts) > 0:
+        g = math.gcd(g, int(local_experts))
+    g = math.gcd(g, tot_experts)
+
+    if g <= 0:
+        g = 1
+    if tot_experts % g != 0:
+        g = 1
+    return g
+
+
 def _inject_virtual_group_init_for_gates(
     state_dict, model,
     *,
-    tot_experts=16,
-    group_size=4,
-    init="normal",  # 이제 의미가 생김: "normal"만 지원(원하면 "keep_ref"도 추가 가능)
-    std=0.02,       # Megatron default init_method_std
+    cfg=None,
+    init="normal",
+    std=0.02,
     verbose=True,
     sample_blocks=(1,)
 ):
     model_sd = model.state_dict()
-    assert tot_experts % group_size == 0
-    num_groups = tot_experts // group_size  # e.g. 4
+    gate_key_pattern = re.compile(
+        r"^blocks\.\d+\.(?:mlp\.)?(?:gate(?:\.\d+)?|shared_gate)\.w_gate$"
+    )
+    gate_keys = [k for k in model_sd.keys() if gate_key_pattern.search(k)]
+
+    if not gate_keys:
+        raise KeyError(
+            "No gate w_gate keys matched expected patterns: "
+            "blocks.{i}.gate.w_gate | blocks.{i}.gate.{j}.w_gate | "
+            "blocks.{i}.shared_gate.w_gate | blocks.{i}.mlp.gate.w_gate | "
+            "blocks.{i}.mlp.gate.{j}.w_gate"
+        )
 
     if verbose:
         print(f"[VGI] === _inject_virtual_group_init_for_gates START ===")
-        print(f"[VGI] tot_experts={tot_experts}, group_size={group_size}, num_groups={num_groups}, init={init}, std={std}")
+        print(f"[VGI] found {len(gate_keys)} gate keys to initialize, init={init}, std={std}")
 
-    def build_grouped_w_gate(ref: torch.Tensor) -> torch.Tensor:
-        """
-        1) Re-init router weights with Normal(0, std) (Megatron-like)
-        2) Virtual group init: take first group columns and replicate to all groups
-        """
+    def build_grouped_w_gate(ref: torch.Tensor, group_size: int) -> torch.Tensor:
         assert ref.ndim == 2, ref.shape
-        d_model, n = ref.shape
-        assert n == tot_experts, f"expected {tot_experts}, got {n}"
-        assert tot_experts % group_size == 0
-        assert num_groups == (tot_experts // group_size)
+        d_model, tot_experts = ref.shape
+        assert group_size >= 1
+        assert tot_experts % group_size == 0, (
+            f"group_size={group_size} must divide tot_experts={tot_experts}"
+        )
 
-        # ---- Step A: re-init (ignore ref values) ----
-        W = torch.empty((d_model, tot_experts), device=ref.device, dtype=ref.dtype)
-
+        w = torch.empty((d_model, tot_experts), device=ref.device, dtype=ref.dtype)
         if init == "normal":
-            torch.nn.init.normal_(W, mean=0.0, std=std)
+            torch.nn.init.normal_(w, mean=0.0, std=std)
         else:
-            raise ValueError(f"Unsupported init={init}. Use init='normal' for Megatron-like init.")
+            raise ValueError(f"Unsupported init={init}. Use init='normal'.")
 
-        # ---- Step B: virtual-group init (Megatron upcycling style) ----
-        # Split by expert dimension (columns) into num_groups chunks, each [d_model, group_size]
-        chunks = torch.tensor_split(W, num_groups, dim=1)
-        proto = chunks[0]  # first group
-        W_grouped = torch.cat([proto for _ in range(num_groups)], dim=1).contiguous()
+        if group_size == 1:
+            return w
 
-        return W_grouped
-
-    gate_keys = [k for k in model_sd.keys()
-                 if re.search(r"^blocks\.\d+\.mlp\.gate\.\d+\.w_gate$", k)]
-
-    if not gate_keys:
-        raise KeyError("No gate w_gate keys matched pattern blocks.{i}.mlp.gate.{j}.w_gate")
-
-    if verbose:
-        print(f"[VGI] found {len(gate_keys)} gate keys to initialize")
+        num_groups = tot_experts // group_size
+        chunks = torch.tensor_split(w, num_groups, dim=1)
+        proto = chunks[0]
+        return torch.cat([proto for _ in range(num_groups)], dim=1).contiguous()
 
     for k in gate_keys:
-        # ref only used for shape/device/dtype
         ref = state_dict.get(k, model_sd[k])
         ref_src = "state_dict" if k in state_dict else "model_sd (fresh)"
-        new_w = build_grouped_w_gate(ref).cpu()
+        tot_experts = int(ref.shape[1])
+
+        m = re.search(r"^blocks\.(\d+)\.", k)
+        blk_id = int(m.group(1)) if m else None
+        blk = None
+        blk_mlp = None
+        if blk_id is not None and hasattr(model, "blocks") and blk_id < len(model.blocks):
+            blk = model.blocks[blk_id]
+            blk_mlp = getattr(blk, "mlp", None)
+
+        local_experts = getattr(blk_mlp, "num_expert", _cfg_get(cfg, "moe_experts_local", None))
+        world_size = getattr(
+            blk,
+            "world_size",
+            getattr(blk_mlp, "world_size", _cfg_get(cfg, "moe_world_size", 1)),
+        )
+        if world_size is None or int(world_size) < 1:
+            world_size = 1
+        world_size = int(world_size)
+
+        dense_hidden = None
+        expert_hidden = None
+        if blk_id is not None:
+            k_fc1_w = f"blocks.{blk_id}.mlp.fc1.weight"
+            if k_fc1_w in state_dict:
+                dense_hidden = int(state_dict[k_fc1_w].shape[0])
+            k_e1_w = f"blocks.{blk_id}.mlp.experts.htoh4.weight"
+            if k_e1_w in model_sd:
+                expert_hidden = int(model_sd[k_e1_w].shape[1])
+            elif k_e1_w in state_dict:
+                expert_hidden = int(state_dict[k_e1_w].shape[1])
+
+        group_size = _auto_virtual_group_size(
+            tot_experts,
+            local_experts=local_experts,
+            world_size=world_size,
+            dense_hidden=dense_hidden,
+            expert_hidden=expert_hidden,
+        )
+
+        new_w = build_grouped_w_gate(ref, group_size).cpu()
         state_dict[k] = new_w
 
         if verbose:
-            m = re.search(r"^blocks\.(\d+)\.", k)
-            blk_id = int(m.group(1)) if m else None
             if blk_id in sample_blocks:
-                print(f"[VGI] {k}: ref_src={ref_src}, ref_shape={tuple(ref.shape)} -> new_shape={tuple(new_w.shape)}")
-                print(f"[VGI]   Normal(0,{std}) then grouped-replica (num_groups={num_groups})")
-                print(f"[VGI]   new_w stats: mean={new_w.mean():.5f}, std={new_w.std():.5f}, min={new_w.min():.5f}, max={new_w.max():.5f}")
+                print(
+                    f"[VGI] {k}: ref_src={ref_src}, shape={tuple(ref.shape)}, "
+                    f"tot={tot_experts}, local={local_experts}, world={world_size}, G={group_size}"
+                )
+                if group_size == 1:
+                    print("[VGI]   G=1 -> virtual grouping is no-op (normal init only)")
+                print(f"[VGI]   new_w stats: mean={new_w.mean():.5f}, std={new_w.std():.5f}")
             else:
-                print(f"[VGI] {k} <- initialized {tuple(new_w.shape)}")
+                suffix = " (virtual grouping no-op)" if group_size == 1 else ""
+                print(f"[VGI] {k} <- initialized {tuple(new_w.shape)}, G={group_size}{suffix}")
 
     if verbose:
         print(f"[VGI] === _inject_virtual_group_init_for_gates DONE ===")
