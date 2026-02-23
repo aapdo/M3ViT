@@ -375,6 +375,16 @@ class WandbLogger:
                 metrics["moe/analysis/top1_prob_mean"] = analysis['top1_prob_mean']
             if 'dead_expert_ratio' in analysis:
                 metrics["moe/analysis/dead_expert_ratio"] = analysis['dead_expert_ratio']
+            if 'expert_load_cv' in analysis:
+                metrics["moe/analysis/expert_load_cv"] = analysis['expert_load_cv']
+            if 'clean_logit_std' in analysis:
+                metrics["moe/analysis/clean_logit_std"] = analysis['clean_logit_std']
+            if 'moe_out_norm_ratio' in analysis:
+                metrics["moe/analysis/moe_out_norm_ratio"] = analysis['moe_out_norm_ratio']
+            if 'active_vs_dense_flops_ratio' in analysis:
+                metrics["moe/analysis/active_vs_dense_flops_ratio"] = analysis['active_vs_dense_flops_ratio']
+            if 'expert_hidden_dim' in analysis:
+                metrics["moe/analysis/expert_hidden_dim"] = analysis['expert_hidden_dim']
             if 'shared_bits_flip_rate' in analysis:
                 metrics["moe/analysis/shared_bits_flip_rate"] = analysis['shared_bits_flip_rate']
             if 'partial_split_ratio' in analysis:

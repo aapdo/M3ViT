@@ -365,6 +365,7 @@ class Block(nn.Module):
                  gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False):
         super().__init__()
         self.moe = moe
+        self.last_moe_analysis = None
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
@@ -375,6 +376,9 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.gate_input_ahead = gate_input_ahead
         self.expert_prune = expert_prune
+        self.expert_hidden_dim = None
+        self.dense_hidden_dim = int(dim * mlp_ratio)
+        self.active_vs_dense_flops_ratio = None
         if moe:
             self.tot_expert = moe_experts * world_size
             self.moe_top_k = moe_top_k
@@ -387,6 +391,8 @@ class Block(nn.Module):
             if moe_mlp_ratio < 0:
                 moe_mlp_ratio = mlp_ratio
             moe_hidden_dim = int(dim * moe_mlp_ratio)
+            self.expert_hidden_dim = int(moe_hidden_dim)
+            self.active_vs_dense_flops_ratio = float(self.moe_top_k * self.expert_hidden_dim) / float(max(self.dense_hidden_dim, 1))
 
             if moe_gate_type == "noisy":
                 moe_gate_fun = NoisyGate
@@ -427,7 +433,26 @@ class Block(nn.Module):
         else:
             load = _gates_to_load(gates)
 
-        return x, importance, load
+        probs = gates.float()
+        token_entropy = -(probs.clamp_min(1e-12).log() * probs).sum(dim=-1)
+        gate_entropy_sum = token_entropy.sum()
+        top1_prob_sum = probs.max(dim=-1).values.sum()
+        gate_token_count = probs.new_tensor(float(probs.shape[0]))
+        expert_load_hist = (probs > 0).sum(dim=0).to(probs.dtype)
+        moe_out_norm_ratio = moe_output.float().norm(p=2) / (normed_x.float().norm(p=2) + 1e-12)
+        clean_logit_std = clean_logits.float().std(dim=-1, unbiased=False).mean()
+
+        return (
+            x,
+            importance,
+            load,
+            gate_entropy_sum,
+            top1_prob_sum,
+            gate_token_count,
+            expert_load_hist,
+            moe_out_norm_ratio,
+            clean_logit_std,
+        )
 
     def _ckpt_non_moe(self, x):
         """Checkpointed non-MoE forward: attn + norm2 + mlp"""
@@ -446,25 +471,64 @@ class Block(nn.Module):
                 x = checkpoint(self._ckpt_non_moe, x, use_reentrant=False)
             else:
                 x = self._ckpt_non_moe(x)
+            self.last_moe_analysis = None
             return x, None
 
         # MoE path
         task_id_tensor = torch.tensor(task_id, device=x.device) if task_id is not None else torch.tensor(0, device=x.device)
 
         if self.training:
-            x, importance, load = checkpoint(
+            (
+                x,
+                importance,
+                load,
+                gate_entropy_sum,
+                top1_prob_sum,
+                gate_token_count,
+                expert_load_hist,
+                moe_out_norm_ratio,
+                clean_logit_std,
+            ) = checkpoint(
                 self._ckpt_main_moe,
                 x, gate_inp, task_specific_feature, sem, task_id_tensor,
                 use_reentrant=False
             )
         else:
-            x, importance, load = self._ckpt_main_moe(x, gate_inp, task_specific_feature, sem, task_id_tensor)
+            (
+                x,
+                importance,
+                load,
+                gate_entropy_sum,
+                top1_prob_sum,
+                gate_token_count,
+                expert_load_hist,
+                moe_out_norm_ratio,
+                clean_logit_std,
+            ) = self._ckpt_main_moe(x, gate_inp, task_specific_feature, sem, task_id_tensor)
 
         # CV loss calculation outside checkpoint
         if self.training:
             cv_loss = cv_squared(importance) + cv_squared(load)
         else:
             cv_loss = 0
+
+        load_f = load.float()
+        if load_f.numel() <= 1:
+            expert_load_cv = 0.0
+        else:
+            expert_load_cv = float((load_f.var(unbiased=False) / (load_f.mean().pow(2) + 1e-10)).item())
+
+        self.last_moe_analysis = {
+            "gate_entropy_sum": float(gate_entropy_sum.item()),
+            "top1_prob_sum": float(top1_prob_sum.item()),
+            "gate_token_count": int(gate_token_count.item()),
+            "expert_load_hist": [int(v) for v in expert_load_hist.tolist()],
+            "expert_load_cv": expert_load_cv,
+            "clean_logit_std": float(clean_logit_std.item()),
+            "moe_out_norm_ratio": float(moe_out_norm_ratio.item()),
+            "expert_hidden_dim": int(self.expert_hidden_dim) if self.expert_hidden_dim is not None else 0,
+            "active_vs_dense_flops_ratio": float(self.active_vs_dense_flops_ratio) if self.active_vs_dense_flops_ratio is not None else 0.0,
+        }
 
         return x, cv_loss
 
@@ -591,6 +655,12 @@ class VisionTransformerMoE(nn.Module):
 
         self.init_weights()
         self.idx = 0
+        self.latest_moe_stats = None
+        try:
+            from utils.wandb_logger import get_wandb_logger
+            self.wandb_logger = get_wandb_logger
+        except:
+            self.wandb_logger = None
     def init_weights(self, pretrained=None):
         for n, m in self.named_modules():
             if isinstance(m, nn.Linear):
@@ -673,17 +743,85 @@ class VisionTransformerMoE(nn.Module):
             task_specific_feature = self.gate_task_represent(task_specific)
         out = None
         total_cv_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype, requires_grad=True)
+        stats = {"moe_blocks": 0, "total_positions": 0}
+        analysis = {
+            "gate_entropy_sum": 0.0,
+            "top1_prob_sum": 0.0,
+            "gate_token_count": 0,
+            "expert_load_cv_sum": 0.0,
+            "clean_logit_std_sum": 0.0,
+            "moe_out_norm_ratio_sum": 0.0,
+            "expert_hidden_dim_sum": 0.0,
+            "active_vs_dense_flops_ratio_sum": 0.0,
+            "analysis_block_count": 0,
+            "expert_load_hist": None,
+        }
 
         for i, blk in enumerate(self.blocks):
             if blk.moe:
                 x, cv_loss = blk(x, gate_inp, task_id, task_specific_feature, sem=sem)
                 if cv_loss is not None:
                     total_cv_loss = total_cv_loss + cv_loss
+                stats["moe_blocks"] += 1
+                stats["total_positions"] += int(B * max(x.shape[1] - 1, 0))
+
+                block_analysis = getattr(blk, "last_moe_analysis", None)
+                if isinstance(block_analysis, dict):
+                    analysis["gate_entropy_sum"] += float(block_analysis.get("gate_entropy_sum", 0.0))
+                    analysis["top1_prob_sum"] += float(block_analysis.get("top1_prob_sum", 0.0))
+                    analysis["gate_token_count"] += int(block_analysis.get("gate_token_count", 0))
+                    analysis["expert_load_cv_sum"] += float(block_analysis.get("expert_load_cv", 0.0))
+                    analysis["clean_logit_std_sum"] += float(block_analysis.get("clean_logit_std", 0.0))
+                    analysis["moe_out_norm_ratio_sum"] += float(block_analysis.get("moe_out_norm_ratio", 0.0))
+                    analysis["expert_hidden_dim_sum"] += float(block_analysis.get("expert_hidden_dim", 0.0))
+                    analysis["active_vs_dense_flops_ratio_sum"] += float(block_analysis.get("active_vs_dense_flops_ratio", 0.0))
+                    analysis["analysis_block_count"] += 1
+
+                    block_hist = block_analysis.get("expert_load_hist", None)
+                    if block_hist is not None:
+                        if analysis["expert_load_hist"] is None:
+                            analysis["expert_load_hist"] = [0] * len(block_hist)
+                        if len(analysis["expert_load_hist"]) == len(block_hist):
+                            for j in range(len(block_hist)):
+                                analysis["expert_load_hist"][j] += int(block_hist[j])
             else:
                 x, _ = blk(x)
 
             if i in self.out_indices:
                 out = x
+
+        gate_token_count = analysis["gate_token_count"]
+        if gate_token_count > 0:
+            gate_entropy = analysis["gate_entropy_sum"] / float(gate_token_count)
+            top1_prob_mean = analysis["top1_prob_sum"] / float(gate_token_count)
+        else:
+            gate_entropy = 0.0
+            top1_prob_mean = 0.0
+
+        block_count = max(analysis["analysis_block_count"], 1)
+        expert_load_hist = analysis["expert_load_hist"] if analysis["expert_load_hist"] is not None else []
+        if len(expert_load_hist) > 0:
+            dead_expert_ratio = float(sum(1 for v in expert_load_hist if v == 0)) / float(len(expert_load_hist))
+        else:
+            dead_expert_ratio = 0.0
+
+        stats["analysis"] = {
+            "gate_entropy": gate_entropy,
+            "top1_prob_mean": top1_prob_mean,
+            "expert_load_hist": expert_load_hist,
+            "dead_expert_ratio": dead_expert_ratio,
+            "expert_load_cv": analysis["expert_load_cv_sum"] / float(block_count),
+            "clean_logit_std": analysis["clean_logit_std_sum"] / float(block_count),
+            "moe_out_norm_ratio": analysis["moe_out_norm_ratio_sum"] / float(block_count),
+            "expert_hidden_dim": analysis["expert_hidden_dim_sum"] / float(block_count),
+            "active_vs_dense_flops_ratio": analysis["active_vs_dense_flops_ratio_sum"] / float(block_count),
+        }
+
+        self.latest_moe_stats = stats
+        if self.training and stats["moe_blocks"] > 0 and self.wandb_logger is not None:
+            logger = self.wandb_logger()
+            if logger is not None:
+                logger.log_moe_stats(stats)
 
         return out, total_cv_loss
 
