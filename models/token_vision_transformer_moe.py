@@ -22,13 +22,12 @@ from torch.utils.checkpoint import checkpoint
 
 from .gates import NoisyGate_VMoE as Custom_VMoE
 from models.moe import TaskMoE
-from models.router_state import RouterState, selector_to_bits, popcount_bits, bits_to_task_masks, bits_to_multihot, compute_masks
 from models.aggregation_stages import AggregationStage
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
 
 
-class RouterSelector(nn.Module):
+class ShareabilityPredictor(nn.Module):
     def __init__(self, d_model, d_task_emb=0, temperature=1.0, hard=False):
         """
         Router selector that determines whether each token uses task-specific or shared gate.
@@ -72,6 +71,11 @@ class RouterSelector(nn.Module):
         channel = shape_input[-1]
         inp_flat = inp.reshape(-1, channel)
         BN = inp_flat.shape[0]
+
+        assert not (self.d_task_emb > 0 and task_emb is None), (
+            "ShareabilityPredictor requires task_emb when d_task_emb > 0 "
+            "(check task_emb_T_E wiring)."
+        )
 
         if task_emb is not None:
             if task_emb.dim() == 1:
@@ -404,7 +408,7 @@ class TokenBlock(nn.Module):
         self.gate_input_ahead = gate_input_ahead
 
         # Each stage creates its own Aggregation module
-        # - attn_post_aggr: aggregation after attention, before LN2 (uses prev_state)
+        # - attn_post_aggr: aggregation after attention, before LN2 (uses previous shared_bits)
         # - mlp_post_aggr: aggregation after MLP (uses curr_state, MoE only)
         if num_tasks > 0:
             self.attn_post_aggr = AggregationStage(Aggregation(), num_tasks)
@@ -412,6 +416,20 @@ class TokenBlock(nn.Module):
         else:
             self.attn_post_aggr = None
             self.mlp_post_aggr = None
+
+        # Shareability predictor is used in all blocks (Dense + MoE).
+        if num_tasks > 0:
+            assert gate_task_specific_dim > 0, (
+                f"gate_task_specific_dim must be positive, got {gate_task_specific_dim}"
+            )
+            self.share_pred = ShareabilityPredictor(
+                d_model=dim,
+                d_task_emb=gate_task_specific_dim,
+                temperature=1.0,
+                hard=False,
+            )
+        else:
+            self.share_pred = None
 
         if moe:
             activation = nn.Sequential(
@@ -438,9 +456,6 @@ class TokenBlock(nn.Module):
 
             d_gate_with_emb = dim + gate_task_specific_dim
             d_gate_no_emb = dim
-
-            # RouterSelector - determines shared vs task-specific
-            self.router_selector = RouterSelector(d_model=dim, d_task_emb=gate_task_specific_dim, temperature=1.0, hard=False)
 
             # Shared gate - always receives multi-hot task embedding
             self.shared_gate = TokenNoisyGate_VMoE(
@@ -469,6 +484,13 @@ class TokenBlock(nn.Module):
             self.mlp = TokenFMoETransformerMLP(
                 num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
                 world_size=world_size, top_k=moe_top_k, activation=activation
+            )
+            # Shared FFN for persistent-sharing path in MoE blocks (B-1).
+            self.shared_ffn = Mlp(
+                in_features=dim,
+                hidden_features=mlp_hidden_dim,
+                act_layer=act_layer,
+                drop=drop,
             )
             self.mlp_drop = nn.Dropout(drop)
 
@@ -543,108 +565,38 @@ class TokenBlock(nn.Module):
         prob_if_out = normal.cdf((clean_values - threshold_if_out) / (noise_stddev + 1e-9))
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
-
-    def _route_tokens(self, x, selector_output, task_id, task_emb, gate_shared_emb):
+    
+    def _route_tokens(self, x, task_id, task_emb):
         """
-        Route tokens through appropriate gates based on selector output.
+        Route TH tokens through task gates only.
 
         Args:
-            x: Input tensor [B, N, D] (dense) or [K, D] (masked)
-            selector_output: [B, N] (dense) or [K] (masked) router selector output
-            task_id: Task ID for selecting task-specific gate (int)
-            task_emb: [E] one-hot task embedding for task-specific gate
-            gate_shared_emb: [B, N, E] (dense) or [K, E] (masked) multi-hot embedding for shared gate
+            x: Input tensor [K, D] or [B, N, D]
+            task_id: Task index
+            task_emb: [E] embedding for single-gate mode
 
         Returns:
-            gate_top_k_idx: [B*N, top_k] or [K, top_k] expert indices
-            gate_score: [B*N, top_k] or [K, top_k] expert scores
+            gate_top_k_idx: [K, top_k]
+            gate_score: [K, top_k]
             gate_info: dict with clean_logits, noisy_logits, noise_stddev, top_logits, gates
         """
         device = x.device
-
-        # Handle both dense [B, N, D] and masked [K, D] inputs
         if x.dim() == 3:
-            # Dense mode: [B, N, D]
             B, N, D = x.shape
-            B_N = B * N
-            x_flat = x.reshape(B_N, D)
-            selector_flat = selector_output.reshape(-1)
-            if gate_shared_emb is not None:
-                shared_emb_flat = gate_shared_emb.reshape(B_N, -1)
-            else:
-                shared_emb_flat = None
+            x_flat = x.reshape(B * N, D)
         elif x.dim() == 2:
-            # Masked mode: [K, D]
-            K, D = x.shape
-            B_N = K
-            x_flat = x  # Already flat
-            selector_flat = selector_output  # Already flat [K]
-            shared_emb_flat = gate_shared_emb  # Already flat [K, E] or None
+            x_flat = x
         else:
             raise ValueError(f"Expected x to be 2D or 3D, got {x.dim()}D")
 
-        # Flatten x to [B*N, D] or use [K, D] directly
-        # (x_flat already set above)
-
-        # Create masks
-        shared_mask = (selector_flat > 0.5)
-        task_mask = (selector_flat <= 0.5)
-
-        # Prepare task embedding flat: [E] -> [B*N, E] or [K, E]
-        task_emb_flat = None
-        if task_emb is not None:
-            task_emb_flat = task_emb.unsqueeze(0).expand(B_N, -1)
-
-        # Initialize output tensors
-        gate_top_k_idx = torch.zeros(B_N, self.moe_top_k, dtype=torch.long, device=device)
-        gate_score = torch.zeros(B_N, self.moe_top_k, device=device)
-
-        # Initialize tensors for cv_loss computation
-        clean_logits = torch.zeros(B_N, self.tot_expert, device=device)
-        noisy_logits = torch.zeros(B_N, self.tot_expert, device=device)
-        noise_stddev = torch.zeros(B_N, self.tot_expert, device=device)
-        top_logits = torch.zeros(B_N, self.moe_top_k + 1, device=device)
-        gates = torch.zeros(B_N, self.tot_expert, device=device)
-
-        # Route shared tokens through shared_gate
-        if shared_mask.any():
-            shared_inp = x_flat[shared_mask]
-            # CRITICAL: shared_emb_flat must exist when routing shared tokens
-            # self.shared_gate expects input dim = d_gate_with_emb = dim + gate_task_specific_dim
-            # Without embedding concat, input would be dim (shape mismatch)
-            assert shared_emb_flat is not None, (
-                "shared_emb_flat is None but shared tokens exist. "
-                "This indicates gate_shared_emb was not generated in Block.forward(). "
-                "Ensure gate_task_represent is provided when gate_task_specific_dim > 0."
-            )
-            shared_inp = torch.cat([shared_inp, shared_emb_flat[shared_mask]], dim=-1)
-            (s_idx, s_score), s_clean, s_noisy, s_noise_std, s_top, s_gates = self.shared_gate(shared_inp)
-            gate_top_k_idx[shared_mask] = s_idx
-            gate_score[shared_mask] = s_score
-            clean_logits[shared_mask] = s_clean
-            noisy_logits[shared_mask] = s_noisy
-            noise_stddev[shared_mask] = s_noise_std
-            top_logits[shared_mask] = s_top
-            gates[shared_mask] = s_gates
-
-        # Route task-specific tokens through task-specific gate
-        if task_mask.any():
-            task_inp = x_flat[task_mask]
-            if self.multi_gate:
-                # multi_gate: separate gate per task, no need for task embedding
-                (t_idx, t_score), t_clean, t_noisy, t_noise_std, t_top, t_gates = self.gate[task_id](task_inp)
-            else:
-                # single gate: concat task embedding to distinguish
-                assert task_emb_flat is not None, "task_emb required for single gate mode"
-                task_inp = torch.cat([task_inp, task_emb_flat[task_mask]], dim=-1)
-                (t_idx, t_score), t_clean, t_noisy, t_noise_std, t_top, t_gates = self.gate(task_inp, task_id=task_id)
-            gate_top_k_idx[task_mask] = t_idx
-            gate_score[task_mask] = t_score
-            clean_logits[task_mask] = t_clean
-            noisy_logits[task_mask] = t_noisy
-            noise_stddev[task_mask] = t_noise_std
-            top_logits[task_mask] = t_top
-            gates[task_mask] = t_gates
+        K = x_flat.shape[0]
+        if self.multi_gate:
+            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](x_flat)
+        else:
+            assert task_emb is not None, "task_emb required for single gate mode"
+            task_emb_flat = task_emb.unsqueeze(0).expand(K, -1)
+            gate_inp = torch.cat([x_flat, task_emb_flat], dim=-1)
+            (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate(gate_inp, task_id=task_id)
 
         gate_info = {
             'clean_logits': clean_logits,
@@ -653,7 +605,6 @@ class TokenBlock(nn.Module):
             'top_logits': top_logits,
             'gates': gates,
         }
-
         return gate_top_k_idx, gate_score, gate_info
 
     def _compute_cv_loss(self, gate_info):
@@ -689,6 +640,13 @@ class TokenBlock(nn.Module):
         """
         Initialize auxiliary outputs (loss/stat tracking) on the same device/dtype as outs tensors.
         outs: {task_id: [B, N, C]}
+
+        TODO(stats):
+        - shared_positions
+        - shared_tasktoken_count
+        - shared_position_ratio
+        - shared_tasktoken_ratio
+        - optional flip_rate vs previous block
         """
         # Pick a reference tensor safely
         if 0 in outs:
@@ -704,7 +662,6 @@ class TokenBlock(nn.Module):
                 "total_positions": 0,
                 "shared_positions": 0,
                 "shared_tasktoken_count": 0,
-                "aggregated_positions": 0,
             },
         }
 
@@ -789,61 +746,7 @@ class TokenBlock(nn.Module):
                     aux[k] = v
 
         return aux
-    # ==========================================================================
-    # Aggregation
-    # ==========================================================================
-    def prev_aggregate_stage(self, outs: dict, prev_state, aux: dict):
-        """
-        Post-attention aggregation stage (uses prev_state.shared_bits).
-        Aggregates only where prev_count >= 2.
 
-        Returns:
-            outs: updated outs
-            aux: updated aux (stats)
-        """
-        # No previous state or no aggregation module => no-op
-        if prev_state is None or self.attn_post_aggr is None:
-            return outs, aux
-
-        prev_bits = prev_state.shared_bits  # [B, N] int64 bitmask
-        prev_count = popcount_bits(prev_bits, self.num_tasks)  # [B, N] int counts
-        attn_agg_needed = (prev_count >= 2)  # [B, N] bool
-
-        # Build per-task masks from prev_bits
-        prev_task_masks = bits_to_task_masks(prev_bits, self.num_tasks)  # list/tuple of [B, N] bool
-
-        # Perform aggregation (AggregationStage should handle dict outs)
-        outs = self.attn_post_aggr(outs, prev_task_masks, attn_agg_needed)
-
-        return outs, aux
-
-    def after_moe_aggregate_stage(self, outs: dict, curr_bits: torch.Tensor, aux: dict):
-        """
-        MoE 이후 aggregation 단계.
-        Args:
-            outs: {task_id: [B, N, C]}
-            curr_bits: [B, N] int64 bitmask (현재 블록 selector 기반)
-            aux: dict
-        Returns:
-            outs, aux
-        """
-        if self.mlp_post_aggr is None:
-            return outs, aux
-
-        curr_count = popcount_bits(curr_bits, self.num_tasks)  # [B, N]
-        mlp_agg_needed = (curr_count >= 2)  # [B, N]
-
-        curr_task_masks = bits_to_task_masks(curr_bits, self.num_tasks)
-        outs = self.mlp_post_aggr(outs, curr_task_masks, mlp_agg_needed)
-
-        # stats 업데이트
-        stats = aux.setdefault("stats", {})
-        stats["shared_positions"] = stats.get("shared_positions", 0) + int((curr_count > 0).sum().item())
-        stats["shared_tasktoken_count"] = stats.get("shared_tasktoken_count", 0) + int(curr_count.sum().item())
-        stats["aggregated_positions"] = stats.get("aggregated_positions", 0) + int(mlp_agg_needed.sum().item())
-
-        return outs, aux
-    
     # ==========================================================================
     # LN1 + Attn + Residual
     # ==========================================================================
@@ -876,21 +779,55 @@ class TokenBlock(nn.Module):
     # ==========================================================================
     # LN2 + MLP + Residual
     # ==========================================================================
-    def dense_mlp_stage(self, outs: dict):
+    def dense_mlp_stage(self, outs: dict, shared_bits: torch.Tensor | None = None):
         """
         Dense MLP stage orchestration (non-MoE):
-        for each task: LN2 -> MLP -> Residual  (checkpointing should live inside self._forward_mlp_dense)
+        - default: for each task, LN2 -> MLP -> Residual
+        - if shared_bits is provided: compute only task-specific (TS) tokens
 
         Args:
             outs: {task_id: Tensor[B, N, C]}
+            shared_bits: Optional Tensor[B, N] int64 bitmask.
+                         If provided, positions marked shared for a task are skipped here.
 
         Returns:
             outs: updated dict
         """
+        if shared_bits is None:
+            for task in range(self.num_tasks):
+                outs[task] = self._forward_mlp_dense(outs[task])
+            return outs
 
+        B, N, C = outs[0].shape
+        shared_bits_flat = shared_bits.reshape(-1)
+        ts_masks_flat = [~(((shared_bits_flat >> task) & 1).bool()) for task in range(self.num_tasks)]
+
+        # One drop-path mask per dense block; reused across tasks.
+        shared_dp_mask = None
+        dummy = outs[0].new_zeros((B, N, C))
+        _, shared_dp_mask = self._shared_drop_path(dummy)
+        if shared_dp_mask is not None:
+            keep_prob = 1.0 - float(self.drop_path.drop_prob)
+            dp_scale_per_batch = (shared_dp_mask.squeeze(-1).squeeze(-1) / keep_prob)  # [B]
+        else:
+            dp_scale_per_batch = None
 
         for task in range(self.num_tasks):
-            outs[task] = self._forward_mlp_dense(outs[task])
+            x = outs[task]
+            x_flat = x.reshape(B * N, C)
+            ts_idx = ts_masks_flat[task].nonzero(as_tuple=False).squeeze(1)
+            if ts_idx.numel() == 0:
+                continue
+
+            normed_flat = self.norm2(x).reshape(B * N, C)
+            dense_compute = self.mlp(normed_flat[ts_idx])  # [K,C]
+
+            if dp_scale_per_batch is not None:
+                dense_compute = dense_compute * dp_scale_per_batch[(ts_idx // N)].unsqueeze(-1)
+
+            out_flat = x_flat.clone()
+            out_flat[ts_idx] = out_flat[ts_idx] + dense_compute
+            outs[task] = out_flat.view(B, N, C)
         return outs
     def _forward_mlp_dense(self, x):
         """
@@ -910,123 +847,174 @@ class TokenBlock(nn.Module):
         """Internal checkpointed function: Dense MLP only"""
         normed_x = self.norm2(x)
         return x + self.drop_path(self.mlp(normed_x))
+
+    def shared_dense_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared dense FFN path executed once for persistent-sharing positions."""
+        normed_x = self.norm2(x)
+        return x + self.drop_path(self.mlp(normed_x))
     # ==========================================================================
     # LN2 + MoE + Residual
     # ==========================================================================
-    def router_stage(self, outs: dict, prev_state: "RouterState|None",
-                    task_emb_T_E=None, gate_task_represent=None):
+    def transition_stage(self, outs: dict, prev_shared_bits: torch.Tensor | None,
+                         g_shared: dict, gamma: float = 0.5, eps: float = 1e-6):
         """
-        Router stage: selector -> curr_bits -> reuse detection -> shared gate embedding
+        Merge–Maintain–Split transition stage.
+
+        g_shared로부터 각 위치의 공유 적합도를 분석하고,
+        gamma 이상인 태스크들의 soft-weighted 평균으로 대표 토큰(shared_x)을 생성한다.
+        shared_bits는 어느 태스크가 그 위치에서 shared 경로를 사용하는지의 bitmask.
+
+        Args:
+            outs: {task_id: [B, N, C]}
+            prev_shared_bits: [B, N] int64 bitmask or None (첫 블록이면 None)
+            g_shared: {task_id: [B, N]} — ShareabilityPredictor 출력 (공유 점수)
+            gamma: shared 여부를 결정하는 임계값 (기본 0.5)
+            eps: soft mixing 분모 안정화용
 
         Returns:
-            router_out: dict with at least
-                - is_first_moe: bool
-                - selector: list[T] of [B, N] (per-task)
-                - selector_tbN: [T, B, N]
-                - curr_bits: [B, N] int64
-                - curr_count: [B, N] int64/long (popcount)
-                - reuse_bits: [B, N] int64 or None
-                - reuse_possible_mask: [B, N] bool or None
-                - cached_moe_component: [B, N, C] or None
-                - cached_valid_mask: [B, N] bool or None
-                - gate_shared_emb: [B, N, E] or None
+            shared_bits: [B, N] int64 bitmask (bit t=1 이면 task t가 해당 위치에서 shared)
+            shared_x:    [K, C] 대표 토큰 (공유 위치만 gather된 sparse tensor; 공유 위치 없으면 None)
+            shared_flat_idx: [K] flat indices in [0, B*N)
+            trans_aux:   dict with stats
         """
-        assert self.moe, "router_stage is only used when moe=True"
-
-        # -------- basic shapes --------
+        T = self.num_tasks
         B, N, C = outs[0].shape
         device = outs[0].device
-        dtype = outs[0].dtype
-        T = self.num_tasks
+        # -------- (1) G, M 구성 --------
+        # G: [T, B, N] 공유 점수
+        # M: [T, B, N] bool — gamma 이상이면 shared 후보
+        G = torch.stack([g_shared[t] for t in range(T)], dim=0)  # [T, B, N]
+        M = (G >= gamma)                                           # [T, B, N] bool
 
-        is_first_moe = (prev_state is None)
+        # 공유는 2개 이상 태스크가 동의한 위치에서만 허용
+        shared_count = M.long().sum(dim=0)  # [B, N]
+        valid_shared = (shared_count >= 2)  # [B, N] bool
 
-        # -------- (1) selector 계산/강제 --------
-        if is_first_moe:
-            # 첫 MoE 블록은 task-specific만 (shared=0)
-            selector_tbN = torch.zeros(T, B, N, device=device, dtype=outs[0].dtype)
-            selector_list = [selector_tbN[t] for t in range(T)]
+        # valid_shared 조건 강제 반영
+        M = M & valid_shared.unsqueeze(0)  # [T, B, N]
+
+        # -------- (2) shared_bits 생성 --------
+        shared_bits = torch.zeros((B, N), device=device, dtype=torch.int64)
+        for t in range(T):
+            shared_bits |= (M[t].to(torch.int64) << t)
+
+        # -------- (3) shared_x — A-2 soft mixing (sparse over valid_shared) --------
+        valid_shared_flat = valid_shared.reshape(-1)
+        if not valid_shared_flat.any():
+            shared_x = None
+            shared_flat_idx = None
         else:
-            selector_list = []
+            shared_flat_idx = valid_shared_flat.nonzero(as_tuple=False).squeeze(1)  # [K]
+            K = shared_flat_idx.numel()
+
+            # 점수 × 마스크로 가중치 계산
+            GM = (G * M.float()).reshape(T, B * N)[:, shared_flat_idx]  # [T, K]
+            W_sum = GM.sum(dim=0, keepdim=True) + eps                    # [1, K]
+            W = GM / W_sum                                                # [T, K]
+
+            shared_x = outs[0].new_zeros((K, C))
             for t in range(T):
-                # RouterSelector가 task_emb를 요구하는 구조면 여기서 넣어줌
-                task_emb = task_emb_T_E[t] if task_emb_T_E is not None else None
-                selector_list.append(self.router_selector(outs[t], task_emb=task_emb))  # [B, N]
-            selector_tbN = torch.stack(selector_list, dim=0)  # [T, B, N]
+                x_t = outs[t].reshape(B * N, C)[shared_flat_idx]  # [K, C]
+                shared_x = shared_x + W[t].unsqueeze(-1) * x_t
 
-        # -------- (2) curr_bits / count --------
-        curr_bits = selector_to_bits(selector_tbN, thr=0.5)          # [B, N] int64
-        curr_count = popcount_bits(curr_bits, T)                     # [B, N]
+        # -------- (4) stats --------
+        shared_count_after = M.long().sum(dim=0)
+        partial_split_count = int(((shared_count_after > 0) & (shared_count_after < T)).sum().item())
+        partial_split_total = int(B * N)
+        if prev_shared_bits is not None:
+            prev_bits = prev_shared_bits
+            if prev_bits.shape == shared_bits.shape:
+                flip_count = int((prev_bits != shared_bits).sum().item())
+                flip_total = int(B * N)
+            else:
+                flip_count = 0
+                flip_total = 0
+        else:
+            flip_count = 0
+            flip_total = 0
 
-        # -------- (3) reuse detection + cache init --------
-        reuse_bits = None
-        reuse_possible_mask = None
-        cached_moe_component = None
-        cached_valid_mask = None
-
-        if not is_first_moe:
-            prev_bits = prev_state.shared_bits  # [B, N] int64
-            # compute_masks는 네가 이미 쓰던 그대로 호출
-            # (agg_needed는 여기선 router_stage에서 사용 안 하면 버려도 됨)
-            _, reuse_possible_mask, reuse_bits = compute_masks(prev_bits, curr_bits, T)
-
-            if reuse_possible_mask is not None and reuse_possible_mask.any():
-                cached_moe_component = torch.zeros(B, N, C, device=device, dtype=dtype)
-                cached_valid_mask = torch.zeros(B, N, device=device, dtype=torch.bool)
-
-        # -------- (4) shared gate embedding (gate_shared_emb) --------
-        gate_shared_emb = None
-
-        # 주의:
-        # - shared_gate 입력이 dim+gate_task_specific_dim으로 고정이라면,
-        #   "shared token이 존재하는 블록"에서는 gate_shared_emb가 반드시 필요.
-        # - 첫 MoE 블록은 selector=0 강제라 shared token 자체가 없으므로 생략 가능.
-        if not is_first_moe:
-            if self.gate_task_specific_dim > 0:
-                assert gate_task_represent is not None, (
-                    "gate_task_represent must be provided when shared routing can happen "
-                    "(gate_task_specific_dim > 0 and not first MoE block)."
-                )
-                mh = bits_to_multihot(curr_bits, T)                  # [B, N, T]
-                gate_shared_emb = gate_task_represent(mh)            # [B, N, E]
-                assert gate_shared_emb.shape[-1] == self.gate_task_specific_dim, (
-                    f"gate_shared_emb dim mismatch: expected {self.gate_task_specific_dim}, "
-                    f"got {gate_shared_emb.shape[-1]}"
-                )
-
-        # -------- single-gate safety (optional but recommended) --------
-        # multi_gate=False인 경우, task-specific gate 입력에 task_emb concat이 필요할 수 있음
-        # (너의 _route_tokens 구현 기준)
-        if not self.multi_gate:
-            assert task_emb_T_E is not None, (
-                "task_emb_T_E must not be None when multi_gate=False (single gate needs task embedding)."
-            )
-            assert task_emb_T_E.shape[-1] == self.gate_task_specific_dim, (
-                f"task_emb_T_E dim mismatch: expected {self.gate_task_specific_dim}, "
-                f"got {task_emb_T_E.shape[-1]}"
-            )
-
-        router_out = {
-            "is_first_moe": is_first_moe,
-            "selector": selector_list,                 # list[T] of [B, N]
-            "selector_tbN": selector_tbN,              # [T, B, N]
-            "curr_bits": curr_bits,                    # [B, N] int64
-            "curr_count": curr_count,                  # [B, N]
-            "reuse_bits": reuse_bits,                  # [B, N] int64 or None
-            "reuse_possible_mask": reuse_possible_mask,# [B, N] bool or None
-            "cached_moe_component": cached_moe_component,  # [B, N, C] or None
-            "cached_valid_mask": cached_valid_mask,        # [B, N] or None
-            "gate_shared_emb": gate_shared_emb,        # [B, N, E] or None
-            "task_emb_T_E": task_emb_T_E,              # (forward에서 따로 넣던거 여기서 포함)
+        trans_aux = {
+            "cv_loss": outs[0].new_tensor(0.0),
+            "stats": {
+                "shared_positions": int(valid_shared.sum().item()),
+                "shared_tasktoken_count": int(M.long().sum().item()),
+            },
+            "analysis": {
+                "shared_bits_flip_count": flip_count,
+                "shared_bits_flip_total": flip_total,
+                "partial_split_count": partial_split_count,
+                "partial_split_total": partial_split_total,
+            },
         }
-        return router_out
+
+        return shared_bits, shared_x, shared_flat_idx, trans_aux
+
+    def apply_shared_broadcast(
+        self,
+        outs: dict,
+        shared_bits: torch.Tensor,
+        shared_x: torch.Tensor,
+        shared_flat_idx: torch.Tensor | None = None,
+        *,
+        inplace: bool = False,
+    ):
+        """
+        Apply persistent-sharing broadcast:
+        For each task t, for positions (b,n) where shared_bits has bit t set,
+        force outs[t][b,n,:] = shared_x[b,n,:].
+
+        Args:
+            outs: {t: Tensor[B,N,C]}
+            shared_bits: Tensor[B,N] int64/long bitmask
+            shared_x: Tensor[K,C] representative token (sparse over shared_flat_idx)
+            shared_flat_idx: Tensor[K] flat positions in [0, B*N). If None, it is derived from shared_bits.
+            inplace: if True, write into outs[t] tensors in-place (may break autograd if views)
+                    default False clones each task tensor before indexed assignment.
+
+        Returns:
+            outs: updated dict
+        """
+        T = self.num_tasks
+        if shared_x is None:
+            return outs
+
+        # basic checks
+        x0 = outs[0]
+        B, N, C = x0.shape
+        assert shared_bits.shape == (B, N), f"shared_bits shape {shared_bits.shape} != {(B,N)}"
+
+        if shared_flat_idx is None:
+            shared_flat_idx = (shared_bits.reshape(-1) != 0).nonzero(as_tuple=False).squeeze(1)
+        if shared_flat_idx.numel() == 0:
+            return outs
+        assert shared_x.shape == (shared_flat_idx.numel(), C), (
+            f"shared_x shape {shared_x.shape} != {(shared_flat_idx.numel(), C)}"
+        )
+
+        lookup = shared_flat_idx.new_full((B * N,), -1)
+        lookup[shared_flat_idx] = torch.arange(shared_flat_idx.numel(), device=shared_flat_idx.device)
+
+        for t in range(T):
+            mask_t_flat = ((shared_bits >> t) & 1).reshape(-1).bool()  # [B*N]
+            if not mask_t_flat.any():
+                continue
+
+            idx_t = mask_t_flat.nonzero(as_tuple=False).squeeze(1)
+            rows_t = lookup[idx_t]
+
+            out_t = outs[t] if inplace else outs[t].clone()
+            out_t_flat = out_t.reshape(B * N, C)
+            out_t_flat[idx_t] = shared_x[rows_t]
+            outs[t] = out_t
+
+        return outs
+
     def moe_stage(self, outs: dict, router_out: dict):
         """
         routing + experts + (shared) drop_path + cache reuse
 
         router_out expected keys:
-        - selector: List[Tensor[B,N]] length T     # <- (changed from curr_selector)
-        - gate_shared_emb: Tensor[B,N,E] or None   # <- can be None (e.g., first MoE)
+        - shared_bits: Tensor[B,N] int64
         - reuse_bits: Tensor[B,N] int64 or None
         - cached_moe_component: Tensor[B,N,C] or None   (cache for mlp_drop(expert_out), NOT drop_path)
         - cached_valid_mask: Tensor[B,N] bool or None
@@ -1036,9 +1024,8 @@ class TokenBlock(nn.Module):
         device = outs[0].device
         B, N, C = outs[0].shape
 
-        selector_list = router_out["selector"]  # List[Tensor[B,N]]
-        gate_shared_emb = router_out.get("gate_shared_emb", None)
         reuse_bits = router_out.get("reuse_bits", None)
+        shared_bits = router_out["shared_bits"]
 
         cached = router_out.get("cached_moe_component", None)
         cached_valid = router_out.get("cached_valid_mask", None)
@@ -1057,123 +1044,116 @@ class TokenBlock(nn.Module):
             "stats": {
                 "computed_tokens": 0,
                 "reused_tokens": 0,
-            }
+            },
+            "analysis": {
+                "gate_entropy_sum": 0.0,
+                "top1_prob_sum": 0.0,
+                "gate_token_count": 0,
+            },
         }
+        expert_load_hist = torch.zeros((self.tot_expert,), device=device, dtype=torch.float32)
+
+        shared_bits_flat = shared_bits.reshape(-1)
+        th_masks_flat = [~(((shared_bits_flat >> task) & 1).bool()) for task in range(T)]
+
+        reuse_bits_flat = reuse_bits.reshape(-1) if reuse_bits is not None else None
+        cached_flat = cached.reshape(B * N, C) if cached is not None else None
+        cached_valid_flat = cached_valid.reshape(-1) if cached_valid is not None else None
+
+        if shared_dp_mask is not None:
+            keep_prob = 1.0 - float(self.drop_path.drop_prob)
+            dp_scale_per_batch = (shared_dp_mask.squeeze(-1).squeeze(-1) / keep_prob)  # [B]
+        else:
+            dp_scale_per_batch = None
 
         for task in range(T):
             x = outs[task]                 # [B,N,C]
-            selector = selector_list[task] # [B,N]
-            normed = self.norm2(x)         # [B,N,C]
+            x_flat = x.reshape(B * N, C)
+            normed_flat = self.norm2(x).reshape(B * N, C)
+            th_mask_flat = th_masks_flat[task]
 
             task_emb = task_emb_T_E[task] if task_emb_T_E is not None else None
 
             # ---- compute reuse masks for this task ----
-            can_reuse_mask = None
-            cache_fill_mask = None
+            can_reuse_mask_flat = None
+            cache_fill_mask_flat = None
 
-            if (reuse_bits is not None) and (cached_valid is not None):
-                task_in_reuse = ((reuse_bits >> task) & 1).bool()  # [B,N]
+            if (reuse_bits_flat is not None) and (cached_valid_flat is not None):
+                task_in_reuse = ((reuse_bits_flat >> task) & 1).bool()  # [B*N]
                 if task_in_reuse.any():
-                    can_reuse_mask = task_in_reuse & cached_valid
-
-                    task_shared = (selector > 0.5)
-                    cache_fill_mask = task_in_reuse & task_shared & (~cached_valid)
+                    can_reuse_mask_flat = task_in_reuse & th_mask_flat & cached_valid_flat
+                    cache_fill_mask_flat = task_in_reuse & th_mask_flat & (~cached_valid_flat)
 
             # ---- compute_mask: tokens we must actually run gate+experts on ----
-            if can_reuse_mask is None:
-                compute_mask = torch.ones((B, N), dtype=torch.bool, device=device)
+            if can_reuse_mask_flat is None:
+                compute_mask_flat = th_mask_flat
             else:
-                task_specific = (selector <= 0.5)
-                task_shared = (selector > 0.5)
-                compute_mask = task_specific | (task_shared & (~can_reuse_mask))
-
-            # ---- full reuse (nothing to compute) ----
-            if not compute_mask.any():
-                assert cached is not None, "compute_mask empty but cache is None"
-                expert_drop_out = cached
-                moe_aux["stats"]["reused_tokens"] += int((can_reuse_mask is not None) and can_reuse_mask.sum().item())
-
-                if shared_dp_mask is not None:
-                    keep_prob = 1.0 - float(self.drop_path.drop_prob)
-                    moe_component = expert_drop_out / keep_prob * shared_dp_mask
-                else:
-                    moe_component = expert_drop_out
-
-                outs[task] = x + moe_component
-                continue
+                compute_mask_flat = th_mask_flat & (~can_reuse_mask_flat)
+            compute_idx = compute_mask_flat.nonzero(as_tuple=False).squeeze(1)
 
             # ---- Gather compute tokens ----
-            compute_flat = compute_mask.flatten()             # [B*N]
-            K = int(compute_flat.sum().item())
+            K = int(compute_idx.numel())
             moe_aux["stats"]["computed_tokens"] += K
+            out_flat = x_flat.clone()
 
-            normed_flat = normed.reshape(B * N, C)
-            normed_compute = normed_flat[compute_flat]        # [K,C]
+            if K > 0:
+                normed_compute = normed_flat[compute_idx]        # [K,C]
 
-            selector_flat = selector.flatten()
-            selector_compute = selector_flat[compute_flat]    # [K]
-
-            if gate_shared_emb is None:
-                shared_emb_compute = None
-            else:
-                shared_emb_flat = gate_shared_emb.reshape(B * N, -1)
-                shared_emb_compute = shared_emb_flat[compute_flat]  # [K,E]
-
-            # ---- gate routing only for computed tokens ----
-            gate_idx, gate_score, gate_info = self._route_tokens(
-                normed_compute,
-                selector_output=selector_compute,
-                task_id=task,
-                task_emb=task_emb,
-                gate_shared_emb=shared_emb_compute
-            )
-
-            # ---- experts forward for computed tokens ----
-            expert_out_compute = self.mlp(normed_compute, gate_idx, gate_score)  # [K,C]
-
-            # ---- Scatter back to dense ----
-            expert_out = torch.zeros((B * N, C), device=device, dtype=x.dtype)
-            expert_out[compute_flat] = expert_out_compute
-            expert_out = expert_out.view(B, N, C)  # [B,N,C]
-
-            # ---- mlp_drop (ONLY computed path) ----
-            expert_drop_out = self.mlp_drop(expert_out)  # [B,N,C]
-
-            # ---- cache populate ----
-            if (cache_fill_mask is not None) and cache_fill_mask.any():
-                assert cached is not None, "cache_fill_mask exists but cached tensor is None"
-                cached_valid[cache_fill_mask] = True
-
-                cached = torch.where(
-                    cache_fill_mask.unsqueeze(-1),
-                    expert_drop_out,
-                    cached
+                # ---- gate routing only for computed tokens ----
+                gate_idx, gate_score, gate_info = self._route_tokens(
+                    normed_compute,
+                    task_id=task,
+                    task_emb=task_emb
                 )
+
+                # ---- experts forward for computed tokens ----
+                expert_out_compute = self.mlp(normed_compute, gate_idx, gate_score)  # [K,C]
+                expert_drop_compute = self.mlp_drop(expert_out_compute)  # [K,C]
+
+                # ---- cache populate ----
+                if (cache_fill_mask_flat is not None) and cache_fill_mask_flat.any():
+                    assert cached_flat is not None, "cache_fill_mask exists but cached tensor is None"
+                    fill_idx = cache_fill_mask_flat.nonzero(as_tuple=False).squeeze(1)
+                    if fill_idx.numel() > 0:
+                        pos2row = compute_idx.new_full((B * N,), -1)
+                        pos2row[compute_idx] = torch.arange(K, device=device)
+                        fill_rows = pos2row[fill_idx]
+                        cached_valid_flat[fill_idx] = True
+                        cached_flat[fill_idx] = expert_drop_compute[fill_rows]
+
+                if dp_scale_per_batch is not None:
+                    scale_compute = dp_scale_per_batch[(compute_idx // N)].unsqueeze(-1)
+                    expert_drop_compute = expert_drop_compute * scale_compute
+
+                out_flat[compute_idx] = out_flat[compute_idx] + expert_drop_compute
+
+                # cv loss from ONLY computed tokens gate_info (already K-sized)
+                moe_aux["cv_loss"] = moe_aux["cv_loss"] + self._compute_cv_loss(gate_info)
+
+                gates = gate_info["gates"].float()
+                token_entropy = -(gates * gates.clamp_min(1e-9).log()).sum(dim=-1)
+                moe_aux["analysis"]["gate_entropy_sum"] += float(token_entropy.sum().item())
+                moe_aux["analysis"]["top1_prob_sum"] += float(gates.max(dim=-1).values.sum().item())
+                moe_aux["analysis"]["gate_token_count"] += int(K)
+                expert_load_hist += (gates > 0).sum(dim=0).to(expert_load_hist.dtype)
 
             # ---- merge reuse positions from cache ----
-            if (can_reuse_mask is not None) and can_reuse_mask.any():
-                assert cached is not None, "can_reuse_mask exists but cached tensor is None"
-                moe_aux["stats"]["reused_tokens"] += int(can_reuse_mask.sum().item())
-                expert_drop_out = torch.where(
-                    can_reuse_mask.unsqueeze(-1),
-                    cached,
-                    expert_drop_out
-                )
+            if (can_reuse_mask_flat is not None) and can_reuse_mask_flat.any():
+                assert cached_flat is not None, "can_reuse_mask exists but cached tensor is None"
+                reuse_idx = can_reuse_mask_flat.nonzero(as_tuple=False).squeeze(1)
+                moe_aux["stats"]["reused_tokens"] += int(reuse_idx.numel())
+                reused = cached_flat[reuse_idx]
+                if dp_scale_per_batch is not None:
+                    scale_reuse = dp_scale_per_batch[(reuse_idx // N)].unsqueeze(-1)
+                    reused = reused * scale_reuse
+                out_flat[reuse_idx] = out_flat[reuse_idx] + reused
 
-            # ---- apply SHARED drop_path mask ----
-            if shared_dp_mask is not None:
-                keep_prob = 1.0 - float(self.drop_path.drop_prob)
-                moe_component = expert_drop_out / keep_prob * shared_dp_mask
-            else:
-                moe_component = expert_drop_out
-
-            outs[task] = x + moe_component
-
-            # cv loss from ONLY computed tokens gate_info (already K-sized)
-            moe_aux["cv_loss"] = moe_aux["cv_loss"] + self._compute_cv_loss(gate_info)
+            outs[task] = out_flat.view(B, N, C)
 
         # write back cache (functional update)
         router_out["cached_moe_component"] = cached
+        router_out["cached_valid_mask"] = cached_valid
+        moe_aux["analysis"]["expert_load_hist"] = [int(v) for v in expert_load_hist.tolist()]
         return outs, moe_aux
     def _shared_drop_path(self, x: torch.Tensor):
         """
@@ -1199,41 +1179,182 @@ class TokenBlock(nn.Module):
     # ==========================================================================
     # forward
     # ==========================================================================
-    def _state_for_next_block(self, router_out: dict) -> RouterState:
-        # 다음 블록에서 필요한 최소: shared_bits, shared_selector(선택)
-        curr_bits = router_out["curr_bits"]                  # [B, N] int64
-        selector_tbN = router_out.get("selector_tbN", None)  # [T, B, N] or None
-
-        return RouterState(
-            shared_bits=curr_bits,
-            shared_selector=None if selector_tbN is None else selector_tbN.detach()
-        )
-
-    def forward(self, outs: dict, prev_state: RouterState | None,
-                task_emb_T_E=None, gate_task_represent=None):
+    def _state_for_next_block(self, router_out: dict) -> torch.Tensor:
+        # 다음 블록에서 필요한 최소 상태(shared_bits)만 전달
+        return router_out["curr_bits"]
+    
+    def forward(
+        self,
+        outs: dict,
+        prev_shared_bits: torch.Tensor | None,
+        task_emb_T_E=None,
+        gate_task_represent=None,
+    ):
+        """
+        Persistent Sharing (Merge–Maintain–Split) forward skeleton.
+        - Attention 후: shareability 예측 -> transition(M/M/S) -> shared_x / shared_bits 생성
+        - Shared 토큰: 1회 실행 + broadcast
+        - Task-specific 토큰만 기존 경로( Dense or MoE ) 수행
+       """
+        # -------------------------
+        # 0) aux init
+        # -------------------------
         aux = self._init_aux(outs)
 
-        outs = self.attn_stage(outs)                           # LN1+Attn+res
-        outs, aux = self.prev_aggregate_stage(outs, prev_state, aux)
+        # -------------------------
+        # 1) Attention stage (LN1 + Attn + Residual) - per task
+        # -------------------------
+        outs = self.attn_stage(outs)
 
+        # -------------------------
+        # 2) Shareability score 예측 (모든 블록에서)
+        # -------------------------
+        # - self.share_pred (또는 ShareabilityPredictor)가 있어야 함.
+        # - 입력: outs[t] (post-attn), task_emb(= task_emb_T_E[t]) 옵션
+        # - 출력: g_shared[t] : [B, N] (shared 확률/점수)
+        #
+        # 기대 동작:
+        #   g_shared[t] = self.share_pred(outs[t], task_emb=task_emb_T_E[t])
+        #
+        g_shared = None
+        if hasattr(self, "share_pred") and self.share_pred is not None:
+            g_shared = {}
+            for t in range(self.num_tasks):
+                te = None
+                if task_emb_T_E is not None:
+                    te = task_emb_T_E[t]  # [E]
+                g_shared[t] = self.share_pred(outs[t], task_emb=te)  # [B,N]
+        else:
+            # share_pred가 없으면 디버그/백워드 호환용 기본값(전부 TS 또는 전부 SH 정책) 선택
+            # 여기선 기본적으로 전부 TS로 둠 (shared=0)
+            g_shared = {t: outs[t].new_zeros(outs[t].shape[0], outs[t].shape[1]) for t in range(self.num_tasks)}
+
+        # -------------------------
+        # 3) Merge–Maintain–Split Transition
+        # -------------------------
+        # transition_stage 구현 필요
+        # 입력:
+        #   - outs: {t: [B,N,C]}
+        #   - prev_shared_bits: [B,N] int64 or None
+        #   - g_shared: {t: [B,N]}
+        #   - gamma_share (threshold), |S|>=2 조건 등
+        # 출력:
+        #   - shared_bits: [B,N] int64  (bitmask of tasks in SH)
+        #   - shared_x:    [B,N,C]      (representative token, A-2 soft mixing)
+        #   - (optional) updated outs? (보통은 shared_x/bits만 만들고, 아래에서 broadcast 적용)
+        #
+        # A-2 soft mixing 힌트(벡터화):
+        #   X = stack_t outs[t] => [T,B,N,C]
+        #   G = stack_t g_shared[t] => [T,B,N]
+        #   M = (G >= gamma) => [T,B,N]
+        #   W = (G*M) / (sum(G*M,dim=0)+eps) => [T,B,N]
+        #   shared_x = sum(W[...,None]*X, dim=0) => [B,N,C]
+        #   shared_bits = pack bits from M (and require count>=2)
+        #
+        if hasattr(self, "transition_stage") and self.transition_stage is not None:
+            shared_bits, shared_x, shared_flat_idx, trans_aux = self.transition_stage(
+                outs=outs,
+                prev_shared_bits=prev_shared_bits,
+                g_shared=g_shared,
+            )
+            # TODO: transition stage에서 stats를 넘겨주면 merge
+            aux = self._merge_aux(aux, trans_aux)
+        else:
+            # TODO: transition_stage 없으면 "공유 없음" 기본
+            B, N, C = outs[0].shape
+            shared_bits = outs[0].new_zeros((B, N), dtype=torch.long)
+            shared_x = None  # shared path 없음
+            shared_flat_idx = None
+
+        # -------------------------
+        # 4) Broadcast 강제 적용 (Persistent Sharing 핵심)
+        # -------------------------
+        # apply_broadcast 구현 필요
+        # - shared_bits에 포함된 (t,b,n) 위치는 outs[t][b,n] = shared_x[b,n] 로 강제 동일화
+        # - shared_x가 None이면 no-op
+        if shared_x is not None:
+            if hasattr(self, "apply_shared_broadcast") and self.apply_shared_broadcast is not None:
+                outs = self.apply_shared_broadcast(
+                    outs=outs,
+                    shared_bits=shared_bits,
+                    shared_x=shared_x,
+                    shared_flat_idx=shared_flat_idx,
+                )
+            else:
+                # 기본 구현(느릴 수 있음): task loop로 마스크 대입
+                for t in range(self.num_tasks):
+                    mask_t_flat = ((shared_bits >> t) & 1).reshape(-1).bool()
+                    if not mask_t_flat.any():
+                        continue
+                    idx_t = mask_t_flat.nonzero(as_tuple=False).squeeze(1)
+                    lookup = shared_flat_idx.new_full((outs[t].shape[0] * outs[t].shape[1],), -1)
+                    lookup[shared_flat_idx] = torch.arange(shared_flat_idx.numel(), device=shared_flat_idx.device)
+                    rows_t = lookup[idx_t]
+                    out_t_flat = outs[t].reshape(-1, outs[t].shape[-1]).clone()
+                    out_t_flat[idx_t] = shared_x[rows_t]
+                    outs[t] = out_t_flat.view_as(outs[t])
+
+        # -------------------------
+        # 5) SubLayer2 실행
+        #    - Dense 블록: SH는 dense를 1회(shared_x) 실행 후 broadcast, TS는 per-task dense
+        #    - MoE 블록:   SH는 shared_ffn(B-1) 1회 실행 후 broadcast, TS만 MoE
+        # -------------------------
         if not self.moe:
-            outs = self.dense_mlp_stage(outs)                  # LN2+MLP+res
-            return outs, prev_state, aux
+            # ===== Dense Block =====
+            outs = self.dense_mlp_stage(outs, shared_bits=shared_bits)
 
-        # router_out이 task_emb_T_E까지 포함하도록 router_stage에서 처리
-        router_out = self.router_stage(
-            outs, prev_state,
-            task_emb_T_E=task_emb_T_E,
-            gate_task_represent=gate_task_represent
-        )
+            if shared_x is not None:
+                shared_out = self.shared_dense_forward(shared_x)
+                outs = self.apply_shared_broadcast(
+                    outs=outs,
+                    shared_bits=shared_bits,
+                    shared_x=shared_out,
+                    shared_flat_idx=shared_flat_idx,
+                )
 
-        outs, moe_aux = self.moe_stage(outs, router_out)       # routing+experts(+shared drop_path cache)
-        aux = self._merge_aux(aux, moe_aux)
+            # state 갱신
+            curr_state = self._state_for_next_block({
+                "curr_bits": shared_bits,
+            })
 
-        outs, aux = self.after_moe_aggregate_stage(outs, router_out["curr_bits"], aux)
+            return outs, curr_state, aux
 
-        curr_state = self._state_for_next_block(router_out)
-        return outs, curr_state, aux
+        else:
+            # ===== MoE Block =====
+            # 1) TS MoE 실행
+            moe_aux = None
+
+            router_out = {
+                "shared_bits": shared_bits,
+                "task_emb_T_E": task_emb_T_E,
+                "reuse_bits": None,
+                "cached_moe_component": None,
+                "cached_valid_mask": None,
+            }
+            outs, moe_aux = self.moe_stage(outs, router_out)
+            aux = self._merge_aux(aux, moe_aux)
+
+            # 2) SH shared_ffn 1회 실행 + overwrite broadcast
+            if shared_x is not None:
+                # shared path는 "대표 토큰" 기준 1회 실행
+                # (기존 transformer에서 FFN body가 MLP에 해당하므로, 여기선 self.shared_ffn이 MLP에 해당하는 형태로 가정)
+                # 여기선 shared_ffn이 "FFN body"라고 가정하면 residual을 포함해 적용:
+                shared_out = shared_x + self.drop_path(self.shared_ffn(self.norm2(shared_x)))
+
+                # overwrite broadcast
+                outs = self.apply_shared_broadcast(
+                    outs=outs,
+                    shared_bits=shared_bits,
+                    shared_x=shared_out,
+                    shared_flat_idx=shared_flat_idx,
+                )
+
+            # 3) state 갱신
+            curr_state = self._state_for_next_block({
+                "curr_bits": shared_bits,
+            })
+
+            return outs, curr_state, aux
 
 class TokenVisionTransformerMoE(nn.Module):
     def __init__(self, model_name='vit_large_patch16_384', img_size=384, patch_size=16, in_chans=3, embed_dim=1024, depth=24,
@@ -1278,6 +1399,7 @@ class TokenVisionTransformerMoE(nn.Module):
         act_layer = act_layer or nn.GELU
         self.norm_layer = norm_layer
         self.moe_experts = moe_experts
+        self.moe_mlp_ratio = moe_mlp_ratio
         self.moe_top_k = moe_top_k
         self.multi_gate = multi_gate
 
@@ -1402,7 +1524,7 @@ class TokenVisionTransformerMoE(nn.Module):
         - Prepares tokens
         - Builds per-task outputs dict (safe: clone per task)
         - Builds task_emb_T_E once per forward (stable: fp32 one-hot -> cast back)
-        - Iterates blocks with RouterState passing
+        - Iterates blocks with prev shared_bits passing
         - Aggregates aux (cv_loss + stats)
         """
         B = x.shape[0]
@@ -1425,8 +1547,8 @@ class TokenVisionTransformerMoE(nn.Module):
         # ---- per-task outputs (clone to avoid accidental in-place cross-talk) ----
         outs = {task: x.clone() for task in range(self.num_tasks)}
 
-        # ---- RouterState from previous MoE block ----
-        prev_state = None
+        # ---- shared bits from previous block ----
+        prev_shared_bits = None
 
         # ---- totals ----
         total_cv_loss = x.new_tensor(0.0)
@@ -1436,16 +1558,25 @@ class TokenVisionTransformerMoE(nn.Module):
             "total_positions": 0,           # B*N per MoE block, summed
             "shared_positions": 0,          # #positions where curr_count > 0
             "shared_tasktoken_count": 0,    # sum(curr_count) across positions
-            "aggregated_positions": 0,      # #positions where curr_count >= 2
             "computed_tokens": 0,           # task-token granularity
             "reused_tokens": 0,             # task-token granularity
+        }
+        analysis = {
+            "gate_entropy_sum": 0.0,
+            "top1_prob_sum": 0.0,
+            "gate_token_count": 0,
+            "shared_bits_flip_count": 0,
+            "shared_bits_flip_total": 0,
+            "partial_split_count": 0,
+            "partial_split_total": 0,
+            "expert_load_hist": None,
         }
 
         # ---- block iteration ----
         for blk in self.blocks:
-            outs, curr_state, aux = blk(
+            outs, curr_shared_bits, aux = blk(
                 outs,
-                prev_state,
+                prev_shared_bits,
                 task_emb_T_E=task_emb_T_E,
                 gate_task_represent=self.gate_task_represent,
             )
@@ -1460,24 +1591,38 @@ class TokenVisionTransformerMoE(nn.Module):
                     "total_positions",
                     "shared_positions",
                     "shared_tasktoken_count",
-                    "aggregated_positions",
                     "computed_tokens",
                     "reused_tokens",
                 ]:
                     stats[k] += aux.get("stats", {}).get(k, 0)
 
+                a = aux.get("analysis", {})
+                analysis["gate_entropy_sum"] += float(a.get("gate_entropy_sum", 0.0))
+                analysis["top1_prob_sum"] += float(a.get("top1_prob_sum", 0.0))
+                analysis["gate_token_count"] += int(a.get("gate_token_count", 0))
+                analysis["shared_bits_flip_count"] += int(a.get("shared_bits_flip_count", 0))
+                analysis["shared_bits_flip_total"] += int(a.get("shared_bits_flip_total", 0))
+                analysis["partial_split_count"] += int(a.get("partial_split_count", 0))
+                analysis["partial_split_total"] += int(a.get("partial_split_total", 0))
+
+                block_hist = a.get("expert_load_hist", None)
+                if block_hist is not None:
+                    if analysis["expert_load_hist"] is None:
+                        analysis["expert_load_hist"] = [0] * len(block_hist)
+                    if len(analysis["expert_load_hist"]) == len(block_hist):
+                        for i in range(len(block_hist)):
+                            analysis["expert_load_hist"][i] += int(block_hist[i])
+
             # state for next block
-            prev_state = curr_state
+            prev_shared_bits = curr_shared_bits
 
         # ---- ratios ----
         # A) position-scale ratios (denom = B*N*moe_blocks)
         total_pos = float(stats["total_positions"])
         if total_pos > 0:
             stats["shared_position_ratio"] = stats["shared_positions"] / total_pos
-            stats["aggregation_ratio"] = stats["aggregated_positions"] / total_pos
         else:
             stats["shared_position_ratio"] = 0.0
-            stats["aggregation_ratio"] = 0.0
 
         # B) task-token-scale ratio (denom = B*N*T*moe_blocks)
         total_tasktoken = float(stats["total_positions"]) * T
@@ -1494,6 +1639,39 @@ class TokenVisionTransformerMoE(nn.Module):
         else:
             stats["reuse_ratio"] = 0.0
             stats["compute_ratio"] = 1.0
+
+        gate_token_count = analysis["gate_token_count"]
+        if gate_token_count > 0:
+            gate_entropy = analysis["gate_entropy_sum"] / float(gate_token_count)
+            top1_prob_mean = analysis["top1_prob_sum"] / float(gate_token_count)
+        else:
+            gate_entropy = 0.0
+            top1_prob_mean = 0.0
+
+        if analysis["shared_bits_flip_total"] > 0:
+            shared_bits_flip_rate = analysis["shared_bits_flip_count"] / float(analysis["shared_bits_flip_total"])
+        else:
+            shared_bits_flip_rate = 0.0
+
+        if analysis["partial_split_total"] > 0:
+            partial_split_ratio = analysis["partial_split_count"] / float(analysis["partial_split_total"])
+        else:
+            partial_split_ratio = 0.0
+
+        expert_load_hist = analysis["expert_load_hist"] if analysis["expert_load_hist"] is not None else []
+        if len(expert_load_hist) > 0:
+            dead_expert_ratio = float(sum(1 for v in expert_load_hist if v == 0)) / float(len(expert_load_hist))
+        else:
+            dead_expert_ratio = 0.0
+
+        stats["analysis"] = {
+            "gate_entropy": gate_entropy,
+            "top1_prob_mean": top1_prob_mean,
+            "expert_load_hist": expert_load_hist,
+            "dead_expert_ratio": dead_expert_ratio,
+            "shared_bits_flip_rate": shared_bits_flip_rate,
+            "partial_split_ratio": partial_split_ratio,
+        }
 
         # ---- wandb logging (train only) ----
         if self.training and stats["total_positions"] > 0 and self.wandb_logger is not None:

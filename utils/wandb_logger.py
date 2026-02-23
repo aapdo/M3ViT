@@ -326,13 +326,19 @@ class WandbLogger:
             stats: dictionary containing MoE statistics produced by the model:
                 - shared_position_ratio   : ratio of positions with ≥1 shared task
                 - shared_tasktoken_ratio  : ratio of task-tokens routed through shared gate
-                - aggregation_ratio       : ratio of positions with ≥2 shared tasks (avg-pooled)
                 - reuse_ratio             : ratio of dispatched task-tokens reused from cache
                 - compute_ratio           : ratio of dispatched task-tokens actually computed
                 - computed_tokens         : absolute count of computed task-tokens
                 - reused_tokens           : absolute count of reused task-tokens
                 - total_positions         : B*N summed across MoE blocks
                 - moe_blocks              : number of MoE blocks
+                - analysis (optional):
+                    - gate_entropy
+                    - top1_prob_mean
+                    - expert_load_hist
+                    - dead_expert_ratio
+                    - shared_bits_flip_rate
+                    - partial_split_ratio
         """
         if not self.enabled:
             return
@@ -344,10 +350,6 @@ class WandbLogger:
             metrics["moe/shared_position_ratio"] = stats['shared_position_ratio']
         if 'shared_tasktoken_ratio' in stats:
             metrics["moe/shared_tasktoken_ratio"] = stats['shared_tasktoken_ratio']
-
-        # Aggregation ratio
-        if 'aggregation_ratio' in stats:
-            metrics["moe/aggregation_ratio"] = stats['aggregation_ratio']
 
         # Compute/reuse ratios (task-token-scale)
         if 'reuse_ratio' in stats:
@@ -364,6 +366,22 @@ class WandbLogger:
             metrics["moe/total_positions"] = stats['total_positions']
         if 'moe_blocks' in stats:
             metrics["moe/moe_blocks"] = stats['moe_blocks']
+
+        analysis = stats.get("analysis", None)
+        if isinstance(analysis, dict):
+            if 'gate_entropy' in analysis:
+                metrics["moe/analysis/gate_entropy"] = analysis['gate_entropy']
+            if 'top1_prob_mean' in analysis:
+                metrics["moe/analysis/top1_prob_mean"] = analysis['top1_prob_mean']
+            if 'dead_expert_ratio' in analysis:
+                metrics["moe/analysis/dead_expert_ratio"] = analysis['dead_expert_ratio']
+            if 'shared_bits_flip_rate' in analysis:
+                metrics["moe/analysis/shared_bits_flip_rate"] = analysis['shared_bits_flip_rate']
+            if 'partial_split_ratio' in analysis:
+                metrics["moe/analysis/partial_split_ratio"] = analysis['partial_split_ratio']
+            if 'expert_load_hist' in analysis and isinstance(analysis['expert_load_hist'], (list, tuple)):
+                for i, v in enumerate(analysis['expert_load_hist']):
+                    metrics[f"moe/analysis/expert_load_hist/e{i}"] = v
 
         self.log(metrics)
 
