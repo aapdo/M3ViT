@@ -21,7 +21,10 @@ from .sampler import (
 )
 from models import vits_gate
 from models.vits_gate import VisionTransformerMoCoWithGate
-from utils.moe_utils import read_specific_group_experts
+from utils.moe_utils import (
+    read_specific_group_experts,
+    validate_single_file_moe_checkpoint_or_raise,
+)
 
 """
     Model getters 
@@ -320,6 +323,25 @@ def get_backbone(p, args=None):
                     args.start_epoch = 0
                     msg = backbone.load_state_dict(state_dict, strict=False)
                     assert set(msg.missing_keys) == {"%s.weight" % linear_keyword, "%s.bias" % linear_keyword}
+                elif os.path.isfile(args.pretrained) and (
+                    p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe'
+                ) and (not args.moe_data_distributed):
+                    state_dict = checkpoint['state_dict']
+                    if torch.distributed.is_available() and torch.distributed.is_initialized():
+                        runtime_world_size = torch.distributed.get_world_size()
+                    else:
+                        runtime_world_size = 1
+                    validate_single_file_moe_checkpoint_or_raise(
+                        checkpoint=checkpoint,
+                        state_dict=state_dict,
+                        local_experts=args.moe_experts,
+                        world_size=runtime_world_size,
+                        checkpoint_path=args.pretrained,
+                    )
+                    if args.moe_use_gate:
+                        backbone = cvt_state_dict_moe_gate(state_dict, backbone, p, args, linear_keyword,backbone.h, backbone.w)
+                    else:
+                        backbone = cvt_state_dict(state_dict, backbone, p, args, linear_keyword, moe_dir_read, backbone.h, backbone.w)
                 elif args.moe_use_gate:
                     state_dict = checkpoint['state_dict']
                     backbone = cvt_state_dict_moe_gate(state_dict, backbone, p, args, linear_keyword,backbone.h, backbone.w)
