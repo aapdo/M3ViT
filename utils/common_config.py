@@ -234,6 +234,24 @@ def get_backbone(p, args=None):
             "tot_experts": int(args.moe_experts) * int(moe_world_size),
             "moe_experts": int(args.moe_experts) * int(moe_world_size),
         })
+        share_gamma = bn_args.get("share_gamma", None)
+        if share_gamma is None:
+            share_gamma = getattr(args, "share_gamma", None)
+        if share_gamma is None:
+            share_gamma = 0.5
+
+        bootstrap_share_gamma = bn_args.get("bootstrap_share_gamma", None)
+        if bootstrap_share_gamma is None:
+            bootstrap_share_gamma = getattr(args, "bootstrap_share_gamma", None)
+        if bootstrap_share_gamma is None:
+            bootstrap_share_gamma = 0.3
+
+        bootstrap_first_moe = bn_args.get("bootstrap_first_moe", None)
+        if bootstrap_first_moe is None:
+            bootstrap_first_moe = getattr(args, "bootstrap_first_moe", None)
+        if bootstrap_first_moe is None:
+            bootstrap_first_moe = True
+
         if args.moe_use_gate:
             gate_model = vits_gate.__dict__[args.moe_gate_arch](num_classes=0)
             backbone = TokenVisionTransformerMoE(model_name=bn_args['model_name'],\
@@ -242,7 +260,10 @@ def get_backbone(p, args=None):
                         drop_rate=bn_args['drop_rate'], attn_drop_rate=bn_args['attn_drop_rate'], drop_path_rate=bn_args['drop_path_rate'], norm_cfg=norm_cfg,\
                             pos_embed_interp=bn_args['pos_embed_interp'], random_init=bn_args['random_init'], align_corners=bn_args['align_corners'],\
                                 act_layer=None, weight_init='', moe_mlp_ratio=bn_args['moe_mlp_ratio'], moe_experts=args.moe_experts, moe_top_k=bn_args['moe_top_k'], world_size=moe_world_size,\
-                                    gate_dim=gate_model.num_features,)
+                                    gate_dim=gate_model.num_features,
+                                    share_gamma=share_gamma,
+                                    bootstrap_share_gamma=bootstrap_share_gamma,
+                                    bootstrap_first_moe=bootstrap_first_moe,)
             backbone = VisionTransformerMoCoWithGate(backbone, gate_model)
         else:
             
@@ -255,7 +276,10 @@ def get_backbone(p, args=None):
                                     moe_gate_type=args.moe_gate_type, vmoe_noisy_std=args.vmoe_noisy_std,\
                                         gate_task_specific_dim=args.gate_task_specific_dim, multi_gate=args.multi_gate,
                                         num_experts_pertask = args.num_experts_pertask, num_tasks = args.num_tasks,
-                                        gate_input_ahead = args.gate_input_ahead)
+                                        gate_input_ahead = args.gate_input_ahead,
+                                        share_gamma=share_gamma,
+                                        bootstrap_share_gamma=bootstrap_share_gamma,
+                                        bootstrap_first_moe=bootstrap_first_moe)
         linear_keyword = 'head'
         backbone_channels = 2048
 

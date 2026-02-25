@@ -640,13 +640,6 @@ class TokenBlock(nn.Module):
         """
         Initialize auxiliary outputs (loss/stat tracking) on the same device/dtype as outs tensors.
         outs: {task_id: [B, N, C]}
-
-        TODO(stats):
-        - shared_positions
-        - shared_tasktoken_count
-        - shared_position_ratio
-        - shared_tasktoken_ratio
-        - optional flip_rate vs previous block
         """
         # Pick a reference tensor safely
         if 0 in outs:
@@ -1189,6 +1182,7 @@ class TokenBlock(nn.Module):
         prev_shared_bits: torch.Tensor | None,
         task_emb_T_E=None,
         gate_task_represent=None,
+        share_gamma: float | None = None,
     ):
         """
         Persistent Sharing (Merge–Maintain–Split) forward skeleton.
@@ -1251,11 +1245,13 @@ class TokenBlock(nn.Module):
         #   shared_x = sum(W[...,None]*X, dim=0) => [B,N,C]
         #   shared_bits = pack bits from M (and require count>=2)
         #
+        transition_gamma = 0.5 if share_gamma is None else float(share_gamma)
         if hasattr(self, "transition_stage") and self.transition_stage is not None:
             shared_bits, shared_x, shared_flat_idx, trans_aux = self.transition_stage(
                 outs=outs,
                 prev_shared_bits=prev_shared_bits,
                 g_shared=g_shared,
+                gamma=transition_gamma,
             )
             aux = self._merge_aux(aux, trans_aux)
         else:
@@ -1361,7 +1357,8 @@ class TokenVisionTransformerMoE(nn.Module):
                     pos_embed_interp=False, random_init=False, align_corners=False,
                     act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=8, moe_top_k=4, world_size=2, gate_dim=-1,
                     moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=64,multi_gate=False,
-                    num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False, 
+                    num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False,
+                    share_gamma=0.5, bootstrap_share_gamma=0.3, bootstrap_first_moe=True,
                     **kwargs):
         super(TokenVisionTransformerMoE, self).__init__(**kwargs)
         # print(hybrid_backbone is None)
@@ -1414,10 +1411,12 @@ class TokenVisionTransformerMoE(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate,
                                                 self.depth)]  # stochastic depth decay rule
         blocks = []
-        # Todo: param에 num_task 추가.
         self.num_tasks = num_tasks
         self.gate_task_specific_dim = gate_task_specific_dim
         self.gate_input_ahead = gate_input_ahead
+        self.share_gamma = float(share_gamma)
+        self.bootstrap_share_gamma = float(bootstrap_share_gamma)
+        self.bootstrap_first_moe = bool(bootstrap_first_moe)
 
         if self.gate_task_specific_dim <= 0:
             raise ValueError("gate_task_specific_dim must be > 0 for TokenVisionTransformerMoE MoE routing.")
@@ -1431,18 +1430,17 @@ class TokenVisionTransformerMoE(nn.Module):
         )
 
             # self.gamma = nn.Parameter(torch.Tensor([1]), requires_grad=True)
+        first_moe_index = None
         for i in range(self.depth):
             if i % 2 == 0:
                 # Non-MoE block: also needs num_tasks for attn_post_aggr
-                # TODO(jy): block 0 is Dense MLP and all tasks start from the same representation.
-                # Consider computing once and broadcasting instead of per-task duplicate compute.
                 blocks.append(TokenBlock(dim=self.embed_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, qkv_bias=self.qkv_bias, qk_scale=self.qk_scale,
                 drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer,
                 num_tasks=self.num_tasks))
             else:
+                if first_moe_index is None:
+                    first_moe_index = i
                 # MoE block
-                # TODO(jy): block 1 receives a common representation and is the first split point.
-                # Consider a dedicated bootstrap/transition rule for first-time task divergence.
                 blocks.append(TokenBlock(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                               moe=True, moe_mlp_ratio=moe_mlp_ratio, moe_experts=moe_experts, moe_top_k=moe_top_k, moe_gate_dim=gate_dim, world_size=world_size,
@@ -1451,6 +1449,7 @@ class TokenVisionTransformerMoE(nn.Module):
                               num_experts_pertask = num_experts_pertask, num_tasks = self.num_tasks,
                               gate_input_ahead = self.gate_input_ahead))
         self.blocks = nn.Sequential(*blocks)
+        self.first_moe_index = first_moe_index
 
         # NOTE as per official impl, we could have a pre-logits representation dense layer + tanh here
         # self.repr = nn.Linear(embed_dim, representation_size)
@@ -1575,12 +1574,21 @@ class TokenVisionTransformerMoE(nn.Module):
         }
 
         # ---- block iteration ----
-        for blk in self.blocks:
+        for block_idx, blk in enumerate(self.blocks):
+            effective_share_gamma = self.share_gamma
+            if (
+                self.bootstrap_first_moe
+                and getattr(blk, "moe", False)
+                and self.first_moe_index is not None
+                and block_idx == self.first_moe_index
+            ):
+                effective_share_gamma = self.bootstrap_share_gamma
             outs, curr_shared_bits, aux = blk(
                 outs,
                 prev_shared_bits,
                 task_emb_T_E=task_emb_T_E,
                 gate_task_represent=self.gate_task_represent,
+                share_gamma=effective_share_gamma,
             )
 
             # cv loss
