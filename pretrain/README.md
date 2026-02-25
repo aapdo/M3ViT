@@ -1,0 +1,56 @@
+# ImageNet Pretrain Skeleton (DeiT-style)
+
+This directory provides a DeiT-inspired pretraining pipeline for MoE ViT encoders in this repo.
+
+## Goals
+
+- Keep the training loop close to DeiT structure (`train.py`, `engine`, `datasets`, `samplers`, `losses`).
+- Reuse this repository's encoder implementation (`models/ckpt_vision_transformer_moe.py`).
+- Export checkpoints in a format directly loadable by the existing MTL flow (`--pretrained` + `cvt_state_dict`).
+
+## Main entrypoints
+
+- `pretrain/train.py`: ImageNet pretrain for MoE ViT classification.
+- `pretrain/export_to_mtl.py`: Convert pretrain checkpoint to MTL-compatible checkpoint.
+
+## Checkpoint outputs
+
+Pretraining now writes two checkpoint families:
+
+- Resume checkpoints (rank-local expert layout):
+  - `checkpoint_latest.pth`
+  - `checkpoint_best.pth`
+- MTL-ready checkpoints (global expert layout):
+  - `mtl_latest_global.pth`
+  - `mtl_best_global.pth`
+
+Use `mtl_*_global.pth` for downstream `--pretrained` in MTL training.
+
+## Example
+
+```bash
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --data-path /path/to/imagenet \
+  --output-dir /path/to/output
+
+python pretrain/export_to_mtl.py \
+  --checkpoint /path/to/output/mtl_best_global.pth \
+  --output /path/to/output/mtl_pretrained.pth
+```
+
+If you have train_fastmoe-style shard directory (`0.pth`, `1.pth`, ...):
+
+```bash
+python pretrain/export_to_mtl.py \
+  --checkpoint /path/to/shard_dir \
+  --output /path/to/output/mtl_global.pth
+```
+
+## Notes
+
+- Distillation flags are scaffolded but disabled by default (`--distillation-type none`).
+- The default pipeline uses AdamW + warmup + cosine decay (DeiT-style pretrain setup).
+- Single-file rank-local MoE checkpoints are intentionally rejected by the MTL loader.
+  If a checkpoint was produced in multi-GPU mode and only one local file is available,
+  it cannot be fully reconstructed; use the full shard directory export path.

@@ -11,6 +11,100 @@ from pdb import set_trace
 import torch.nn.functional as F
 import shutil
 
+EXPERT_KEYWORDS = ("mlp.experts.htoh4", "mlp.experts.h4toh")
+
+
+def _strip_checkpoint_prefixes(key):
+    if key.startswith("module."):
+        key = key[len("module.") :]
+    if key.startswith("encoder."):
+        key = key[len("encoder.") :]
+    return key
+
+
+def _first_expert_dim0(state_dict):
+    for key, item in state_dict.items():
+        canonical_key = _strip_checkpoint_prefixes(key)
+        if any(pattern in canonical_key for pattern in EXPERT_KEYWORDS):
+            return int(item.shape[0])
+    return None
+
+
+def validate_single_file_moe_checkpoint_or_raise(
+    checkpoint,
+    state_dict,
+    local_experts,
+    world_size,
+    checkpoint_path,
+):
+    """
+    Fail fast if a single-file checkpoint appears to hold rank-local experts only.
+    """
+    if int(world_size) <= 1:
+        return
+
+    dim0 = _first_expert_dim0(state_dict)
+    if dim0 is None:
+        return
+
+    local_experts = int(local_experts)
+    world_size = int(world_size)
+    expected_global = int(local_experts * world_size)
+
+    meta = checkpoint.get("meta", {}) if isinstance(checkpoint, dict) else {}
+    fmt = meta.get("expert_format", None) if isinstance(meta, dict) else None
+
+    if fmt == "global":
+        if dim0 != expected_global:
+            raise ValueError(
+                "Checkpoint meta says global experts but tensor shape is inconsistent. "
+                f"expected dim0={expected_global}, got {dim0}. path={checkpoint_path}"
+            )
+        return
+
+    if fmt == "local":
+        raise ValueError(
+            "Checkpoint meta indicates rank-local experts only. "
+            f"path={checkpoint_path}\n"
+            "Use a global-expert checkpoint (`mtl_*_global.pth`) or merge shard directory with:\n"
+            "python pretrain/export_to_mtl.py --checkpoint <shard_dir> --output <mtl_global.pth>"
+        )
+
+    ckpt_args = checkpoint.get("args", {}) if isinstance(checkpoint, dict) else {}
+    ckpt_world = ckpt_args.get("world_size", None) if isinstance(ckpt_args, dict) else None
+    ckpt_global = ckpt_args.get("moe_experts", None) if isinstance(ckpt_args, dict) else None
+
+    if ckpt_world is not None and ckpt_global is not None:
+        ckpt_world = int(ckpt_world)
+        ckpt_global = int(ckpt_global)
+        if ckpt_world > 1 and dim0 * ckpt_world == ckpt_global:
+            raise ValueError(
+                "Single-file checkpoint appears to contain rank-local experts only "
+                f"(expert_dim0={dim0}, ckpt_world_size={ckpt_world}, ckpt_global_experts={ckpt_global}).\n"
+                f"path={checkpoint_path}\n"
+                "Use shard directory migration:\n"
+                "python pretrain/export_to_mtl.py --checkpoint <shard_dir> --output <mtl_global.pth>"
+            )
+
+    if dim0 == expected_global:
+        return
+
+    if dim0 == local_experts:
+        raise ValueError(
+            "Single-file checkpoint appears to contain rank-local experts only "
+            f"(expert_dim0={dim0}, local_experts={local_experts}, world_size={world_size}).\n"
+            f"path={checkpoint_path}\n"
+            "Use a global-expert checkpoint (`mtl_*_global.pth`) or export from full shard directory."
+        )
+
+    raise ValueError(
+        "Cannot verify global expert format for single-file MoE checkpoint. "
+        f"expert_dim0={dim0}, expected_global={expected_global}, path={checkpoint_path}\n"
+        "Use a checkpoint with meta.expert_format='global', or export from shard directory:\n"
+        "python pretrain/export_to_mtl.py --checkpoint <shard_dir> --output <mtl_global.pth>"
+    )
+
+
 def gather_features(features, local_rank, world_size):
     features_list = [torch.zeros_like(features) for _ in range(world_size)]
     torch.distributed.all_gather(features_list, features)
@@ -227,4 +321,3 @@ def sync_weights(model, except_key_words):
 
     model.load_state_dict(state_dict)
     return
-

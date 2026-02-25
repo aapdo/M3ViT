@@ -1,0 +1,31 @@
+"""Cosine scheduler with warmup (DeiT-style behavior)."""
+
+import math
+
+from torch.optim.lr_scheduler import LambdaLR
+
+
+def build_scheduler(args, optimizer):
+    base_lr = float(args.lr)
+    min_lr = float(args.min_lr)
+    warmup_epochs = int(args.warmup_epochs)
+    total_epochs = int(args.epochs)
+
+    if base_lr <= 0:
+        raise ValueError(f"lr must be > 0, got {base_lr}")
+
+    min_lr_ratio = min_lr / base_lr
+
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return float(epoch + 1) / float(max(1, warmup_epochs))
+
+        if total_epochs <= warmup_epochs:
+            return 1.0
+
+        progress = float(epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda)

@@ -1,0 +1,92 @@
+# Setup
+setup: pretrain
+
+# Database
+train_db_name: ImageNet1K
+val_db_name: ImageNet1K
+trBatch: 64
+valBatch: 96
+nworkers: 10
+input_size: 224
+nb_classes: 1000
+
+# Optimizer and scheduler (DeiT default)
+epochs: 300
+optimizer: adamw
+optimizer_kwargs:
+  lr: 0.0005
+  momentum: 0.9
+  weight_decay: 0.05
+  opt_betas: [0.9, 0.999]
+  opt_eps: 1.0e-8
+scheduler: cosine
+scheduler_kwargs:
+  warmup_epochs: 5
+  min_lr: 1.0e-5
+  unscale_lr: false
+
+# Model
+model: moe_vit_base
+backbone: VisionTransformer_moe
+backbone_kwargs:
+  model_name: vit_base_patch16_224
+  img_size: 224
+  patch_size: 16
+  in_chans: 3
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  num_classes: 1000
+
+  drop_rate: 0.0
+  pos_embed_interp: false
+  align_corners: false
+
+  mlp_ratio: 4.0
+  qkv_bias: true
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+
+  random_init: true
+  distilled: false
+  moe_mlp_ratio: 2.0
+  moe_experts: 16
+  moe_top_k: 2
+  gate_dim: -1
+  gate_task_specific_dim: -1
+  multi_gate: false
+  moe_gate_type: noisy_vmoe
+  vmoe_noisy_std: 1.0
+
+# Augmentation (DeiT default)
+aug_kwargs:
+  color_jitter: 0.3
+  aa: rand-m9-mstd0.5-inc1
+  train_interpolation: bicubic
+  reprob: 0.25
+  remode: pixel
+  recount: 1
+  repeated_aug: true
+
+  mixup: 0.8
+  cutmix: 1.0
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  mixup_mode: batch
+  smoothing: 0.1
+
+# Distillation
+distillation_kwargs:
+  distillation_type: none
+  teacher_model: regnety_160
+  teacher_path: ""
+  distillation_alpha: 0.5
+  distillation_tau: 1.0
+
+# Runtime
+seed: 0
+amp: true
+pin_mem: true
+dist_eval: true
+print_freq: 50
+save_freq: 10
