@@ -86,7 +86,8 @@ class NormalsMeter(object):
         deg_diff_tmp = torch.masked_select(deg_diff_tmp, valid_mask[:,0])
 
         self.eval_dict['mean'] += torch.sum(deg_diff_tmp).item()
-        self.eval_dict['rmse'] += torch.sum(torch.sqrt(torch.pow(deg_diff_tmp, 2))).item()
+        # Accumulate squared angular error for true RMSE.
+        self.eval_dict['rmse'] += torch.sum(torch.pow(deg_diff_tmp, 2)).item()
         self.eval_dict['11.25'] += torch.sum((deg_diff_tmp < 11.25).float()).item() * 100
         self.eval_dict['22.5'] += torch.sum((deg_diff_tmp < 22.5).float()).item() * 100
         self.eval_dict['30'] += torch.sum((deg_diff_tmp < 30).float()).item() * 100
@@ -98,7 +99,7 @@ class NormalsMeter(object):
     def get_score(self, verbose=True):
         eval_result = dict()
         eval_result['mean'] = self.eval_dict['mean'] / self.eval_dict['n']
-        eval_result['rmse'] = self.eval_dict['rmse'] / self.eval_dict['n']
+        eval_result['rmse'] = (self.eval_dict['rmse'] / self.eval_dict['n']) ** 0.5
         eval_result['11.25'] = self.eval_dict['11.25'] / self.eval_dict['n']
         eval_result['22.5'] = self.eval_dict['22.5'] / self.eval_dict['n']
         eval_result['30'] = self.eval_dict['30'] / self.eval_dict['n']

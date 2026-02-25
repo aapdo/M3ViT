@@ -15,7 +15,7 @@ from utils.config import create_config
 from utils.common_config import get_train_dataset, get_transformations,\
                                 get_val_dataset, get_train_dataloader, get_val_dataloader,\
                                 get_optimizer, get_model, adjust_learning_rate,\
-                                get_criterion
+                                get_criterion, adjust_share_pred_temperature
 from utils.logger import Logger
 from utils.wandb_logger import WandbLogger, set_wandb_logger
 from train.train_utils import train_vanilla,train_vanilla_distributed
@@ -539,6 +539,12 @@ def main():
         # Adjust lr
         lr = adjust_learning_rate(p, optimizer, epoch)
         print('Adjusted learning rate to {:.5f}'.format(lr))
+
+        # Optional shareability-predictor temperature schedule.
+        share_temp, share_temp_count = adjust_share_pred_temperature(p, model, epoch)
+        if share_temp is not None and share_temp_count > 0:
+            print('Adjusted share_pred temperature to {:.4f} ({} blocks)'.format(share_temp, share_temp_count))
+            wandb_logger.log({'train/share_pred_temperature': float(share_temp)})
 
         # Log learning rate to wandb
         wandb_logger.log_learning_rate(lr)
