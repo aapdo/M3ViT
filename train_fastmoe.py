@@ -183,6 +183,8 @@ print('os.environ["LOCAL_RANK"]: ',os.environ["LOCAL_RANK"],args.local_rank)
 
 def main():
     cv2.setNumThreads(0)
+    if int(args.local_rank) < 0:
+        args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
     config_path = args.config_path
     if config_path == 'configs/path_env.yml' and not os.path.exists(config_path) and os.path.exists('configs/env.yml'):
         config_path = 'configs/env.yml'
@@ -224,9 +226,6 @@ def main():
     if args.multi_level is not None:
         p['multi_level'] = args.multi_level
     
-    if int(args.local_rank) < 0:
-        args.local_rank = int(os.environ["LOCAL_RANK"])
-
     args.distributed = False
     if args.local_rank >=0:
         args.distributed = True
