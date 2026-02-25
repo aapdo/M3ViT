@@ -164,6 +164,7 @@ def train_vanilla(p, train_loader, model, criterion, optimizer, epoch, wandb_log
                 current_lr = optimizer.param_groups[0]["lr"]
                 wandb_logger.log({"train/lr": current_lr})
 
+    print('\n[Train metrics] computed on train_loader (not validation set).')
     eval_results = performance_meter.get_score(verbose = True)
 
     # Log epoch-level training metrics to wandb
@@ -226,6 +227,7 @@ def train_mixture_vanilla(p, train_loader, model,prior_model, criterion, optimiz
         if i % 25 == 0:
             progress.display(i)
 
+    print('\n[Train metrics] computed on train_loader (not validation set).')
     eval_results = performance_meter.get_score(verbose = True)
 
     return eval_results
@@ -484,6 +486,7 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             # if args.regu_subimage and epoch<args.warmup_epochs:
             #     print('regu_subimage_loss',regu_subimage_loss)
 
+    print('\n[Train metrics] computed on train_loader (not validation set).')
     eval_results = performance_meter.get_score(verbose = True)
 
     # Log epoch-level training metrics to wandb

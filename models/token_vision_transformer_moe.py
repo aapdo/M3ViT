@@ -1257,10 +1257,8 @@ class TokenBlock(nn.Module):
                 prev_shared_bits=prev_shared_bits,
                 g_shared=g_shared,
             )
-            # TODO: transition stage에서 stats를 넘겨주면 merge
             aux = self._merge_aux(aux, trans_aux)
         else:
-            # TODO: transition_stage 없으면 "공유 없음" 기본
             B, N, C = outs[0].shape
             shared_bits = outs[0].new_zeros((B, N), dtype=torch.long)
             shared_x = None  # shared path 없음
@@ -1436,11 +1434,15 @@ class TokenVisionTransformerMoE(nn.Module):
         for i in range(self.depth):
             if i % 2 == 0:
                 # Non-MoE block: also needs num_tasks for attn_post_aggr
+                # TODO(jy): block 0 is Dense MLP and all tasks start from the same representation.
+                # Consider computing once and broadcasting instead of per-task duplicate compute.
                 blocks.append(TokenBlock(dim=self.embed_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, qkv_bias=self.qkv_bias, qk_scale=self.qk_scale,
                 drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer,
                 num_tasks=self.num_tasks))
             else:
                 # MoE block
+                # TODO(jy): block 1 receives a common representation and is the first split point.
+                # Consider a dedicated bootstrap/transition rule for first-time task divergence.
                 blocks.append(TokenBlock(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                               moe=True, moe_mlp_ratio=moe_mlp_ratio, moe_experts=moe_experts, moe_top_k=moe_top_k, moe_gate_dim=gate_dim, world_size=world_size,

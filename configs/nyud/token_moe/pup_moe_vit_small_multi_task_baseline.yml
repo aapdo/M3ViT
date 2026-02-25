@@ -2,8 +2,8 @@
 setup: multi_task
 
 # Database
-train_db_name: PASCALContext
-val_db_name: PASCALContext
+train_db_name: NYUD
+val_db_name: NYUD 
 trBatch: 8
 valBatch: 8
 nworkers: 4
@@ -17,13 +17,22 @@ optimizer_kwargs:
    weight_decay: 0.0001
 scheduler: poly
 
+# Shareability predictor temperature schedule
+# Use schedule: none | linear | cosine
+share_pred_temp_schedule: cosine
+share_pred_temp_start: 1.5
+share_pred_temp_end: 0.5
+share_pred_temp_warmup_epochs: 5
+
 # Model
 model: token_moe
+model_kwargs:
+   tam: True
 backbone: Token_VisionTransformer_moe
 backbone_kwargs:
    dilated: False
    model_name: 'vit_small_patch16_224'
-   img_size: [512,512]
+   img_size: [480,640]
    patch_size: 16
    in_chans: 3
    embed_dim: 384
@@ -46,9 +55,9 @@ backbone_kwargs:
    moe_mlp_ratio: 2
    # moe_experts: 4
    moe_top_k: 2
-   gate_dim: 389
+   gate_dim: 386
    gate_return_decoupled_activation: False
-   # gate_task_specific_dim: 64
+   
    
 head: TokenVisionTransformerUpHead
 head_kwargs:
@@ -56,13 +65,13 @@ head_kwargs:
    channels: 512
    embed_dim: 384
 
-   img_size: [512,512]
+   img_size: [480,640]
    align_corners: False
    num_conv: 4
    upsampling_method: 'bilinear'
    num_upsampe_layer: 4
    num_classes: 40
-   # in_index: 11  # Deprecated: _transform_inputs is now disabled in TokenVisionTransformerUpHead
+   in_index: 11
 
    patch_size: 16
    conv3x3_conv1x1: True
@@ -72,30 +81,18 @@ head_kwargs:
 # Tasks
 task_dictionary:
    include_semseg: True
-   include_human_parts: True
-   include_sal: True
-   include_edge: True
-   include_normals: True
-   edge_w: 0.95
-
+   include_depth: True
 # Loss kwargs
 loss_kwargs:
    loss_scheme: baseline
    loss_weights:
-      semseg: 1.0
-      human_parts: 2.0
-      sal: 5.0
-      edge: 50.0
-      normals: 10.0
+       semseg: 1.0
+       depth: 1.0
 
 
 # Eval only final 10 epochs for speed-up
-# eval_final_10_epochs_only: False
 eval_final_10_epochs_only: True
 
 # Eval interval during training (before final 10 epochs)
-# If eval_final_10_epochs_only is True, evaluation happens every eval_interval epochs
-# during epochs 0 to (total_epochs - 10), and every epoch during the final 10 epochs
 eval_interval: 10
-
 

@@ -823,6 +823,72 @@ def adjust_learning_rate(p, optimizer, epoch):
 
     return lr
 
+
+def compute_share_pred_temperature(p, epoch):
+    """
+    Compute ShareabilityPredictor temperature for this epoch.
+    Controlled by config keys:
+      - share_pred_temp_schedule: none | linear | cosine
+      - share_pred_temp_start: float
+      - share_pred_temp_end: float
+      - share_pred_temp_warmup_epochs: int
+    """
+    schedule = str(p.get('share_pred_temp_schedule', 'none')).lower()
+    if schedule in ('none', 'off', 'false', ''):
+        return None
+
+    t_start = float(p.get('share_pred_temp_start', 1.0))
+    t_end = float(p.get('share_pred_temp_end', 1.0))
+    warmup_epochs = int(p.get('share_pred_temp_warmup_epochs', 0))
+    total_epochs = int(p.get('epochs', 1))
+
+    if total_epochs <= 1 or epoch < warmup_epochs:
+        return t_start
+
+    denom = max(1, total_epochs - warmup_epochs - 1)
+    progress = min(1.0, max(0.0, float(epoch - warmup_epochs) / float(denom)))
+
+    if schedule == 'linear':
+        temp = t_start + (t_end - t_start) * progress
+    elif schedule == 'cosine':
+        temp = t_end + 0.5 * (t_start - t_end) * (1.0 + math.cos(math.pi * progress))
+    else:
+        raise ValueError(
+            f"Invalid share_pred_temp_schedule: {schedule}. "
+            "Use one of: none, linear, cosine."
+        )
+
+    return float(temp)
+
+
+def _unwrap_model_for_share_pred(model):
+    model_ref = model
+    while hasattr(model_ref, 'module'):
+        model_ref = model_ref.module
+    return model_ref
+
+
+def set_share_pred_temperature(model, temperature):
+    """Set `share_pred.temperature` for all blocks that have `share_pred`."""
+    if temperature is None:
+        return 0
+
+    model_ref = _unwrap_model_for_share_pred(model)
+    applied = 0
+    for module in model_ref.modules():
+        share_pred = getattr(module, 'share_pred', None)
+        if share_pred is not None and hasattr(share_pred, 'temperature'):
+            share_pred.temperature = float(temperature)
+            applied += 1
+    return applied
+
+
+def adjust_share_pred_temperature(p, model, epoch):
+    """Compute and apply shareability temperature. Returns (temperature, num_applied)."""
+    temperature = compute_share_pred_temperature(p, epoch)
+    num_applied = set_share_pred_temperature(model, temperature)
+    return temperature, num_applied
+
 def adjust_learning_rate_epoch(args, optimizer, epoch):
     if args.dataset == 'imagenet':
         blr = args.blr * (args.step_ratio ** (epoch // 30))
