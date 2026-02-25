@@ -370,28 +370,28 @@ class WandbLogger:
         analysis = stats.get("analysis", None)
         if isinstance(analysis, dict):
             if 'gate_entropy' in analysis:
-                metrics["moe/analysis/gate_entropy"] = analysis['gate_entropy']
+                metrics["analysis/gate_entropy"] = analysis['gate_entropy']
             if 'top1_prob_mean' in analysis:
-                metrics["moe/analysis/top1_prob_mean"] = analysis['top1_prob_mean']
+                metrics["analysis/top1_prob_mean"] = analysis['top1_prob_mean']
             if 'dead_expert_ratio' in analysis:
-                metrics["moe/analysis/dead_expert_ratio"] = analysis['dead_expert_ratio']
+                metrics["analysis/dead_expert_ratio"] = analysis['dead_expert_ratio']
             if 'expert_load_cv' in analysis:
-                metrics["moe/analysis/expert_load_cv"] = analysis['expert_load_cv']
+                metrics["analysis/expert_load_cv"] = analysis['expert_load_cv']
             if 'clean_logit_std' in analysis:
-                metrics["moe/analysis/clean_logit_std"] = analysis['clean_logit_std']
+                metrics["analysis/clean_logit_std"] = analysis['clean_logit_std']
             if 'moe_out_norm_ratio' in analysis:
-                metrics["moe/analysis/moe_out_norm_ratio"] = analysis['moe_out_norm_ratio']
+                metrics["analysis/moe_out_norm_ratio"] = analysis['moe_out_norm_ratio']
             if 'active_vs_dense_flops_ratio' in analysis:
-                metrics["moe/analysis/active_vs_dense_flops_ratio"] = analysis['active_vs_dense_flops_ratio']
+                metrics["analysis/active_vs_dense_flops_ratio"] = analysis['active_vs_dense_flops_ratio']
             if 'expert_hidden_dim' in analysis:
-                metrics["moe/analysis/expert_hidden_dim"] = analysis['expert_hidden_dim']
+                metrics["analysis/expert_hidden_dim"] = analysis['expert_hidden_dim']
             if 'shared_bits_flip_rate' in analysis:
-                metrics["moe/analysis/shared_bits_flip_rate"] = analysis['shared_bits_flip_rate']
+                metrics["analysis/shared_bits_flip_rate"] = analysis['shared_bits_flip_rate']
             if 'partial_split_ratio' in analysis:
-                metrics["moe/analysis/partial_split_ratio"] = analysis['partial_split_ratio']
+                metrics["analysis/partial_split_ratio"] = analysis['partial_split_ratio']
             if 'expert_load_hist' in analysis and isinstance(analysis['expert_load_hist'], (list, tuple)):
                 for i, v in enumerate(analysis['expert_load_hist']):
-                    metrics[f"moe/analysis/expert_load_hist/e{i}"] = v
+                    metrics[f"analysis/expert_load_hist/e{i}"] = v
 
         self.log(metrics)
 

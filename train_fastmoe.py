@@ -75,8 +75,9 @@ def str2bool(v):
 
 # Parser
 parser = argparse.ArgumentParser(description='Vanilla Training')
-parser.add_argument('--config_env',
-                    help='Config file for the environment')
+parser.add_argument('--config_path', '--config_env', dest='config_path',
+                    default='configs/path_env.yml',
+                    help='Config file for path/environment settings')
 parser.add_argument('--config_exp',
                     help='Config file for the experiment')
 parser.add_argument("--gpus",
@@ -128,6 +129,9 @@ parser.add_argument('--regu_experts_fromtask',default=False, type=str2bool, help
 parser.add_argument('--num_experts_pertask',default=-1, type=int)
 
 parser.add_argument('--gate_input_ahead',default=False, type=str2bool, help='whether make gate input different from token')
+parser.add_argument('--share_gamma', default=None, type=float, help='default shared-threshold gamma for transition')
+parser.add_argument('--bootstrap_share_gamma', default=None, type=float, help='shared-threshold gamma used only in first MoE block bootstrap')
+parser.add_argument('--bootstrap_first_moe', default=None, type=str2bool, help='whether to apply bootstrap gamma at first MoE block')
 
 parser.add_argument('--regu_sem',default=False, type=str2bool, help='whether use segmentation map to guide expert selection')
 parser.add_argument('--semregu_loss_weight', default=0.01, type=float)
@@ -179,7 +183,10 @@ print('os.environ["LOCAL_RANK"]: ',os.environ["LOCAL_RANK"],args.local_rank)
 
 def main():
     cv2.setNumThreads(0)
-    p = create_config(args.config_env, args.config_exp, local_rank=args.local_rank, args=args)
+    config_path = args.config_path
+    if config_path == 'configs/path_env.yml' and not os.path.exists(config_path) and os.path.exists('configs/env.yml'):
+        config_path = 'configs/env.yml'
+    p = create_config(config_path, args.config_exp, local_rank=args.local_rank, args=args)
     args.num_tasks = len(p.TASKS.NAMES)
     p['multi_gate'] = args.multi_gate
     if args.tam_level0 is not None:
@@ -204,6 +211,12 @@ def main():
     p['backbone_kwargs']['use_virtual_group_initialization'] = args.use_virtual_group_initialization
     if args.moe_top_k is not None:
         p['backbone_kwargs']['moe_top_k']=args.moe_top_k
+    if args.share_gamma is not None:
+        p['backbone_kwargs']['share_gamma'] = args.share_gamma
+    if args.bootstrap_share_gamma is not None:
+        p['backbone_kwargs']['bootstrap_share_gamma'] = args.bootstrap_share_gamma
+    if args.bootstrap_first_moe is not None:
+        p['backbone_kwargs']['bootstrap_first_moe'] = args.bootstrap_first_moe
     if args.trBatch is not None:
         p['trBatch'] = args.trBatch
     if args.valBatch is not None:
@@ -500,8 +513,8 @@ def main():
         wandb_logger.log_config(p, args)
 
         # Save config files to wandb if they exist
-        if args.config_env and os.path.exists(args.config_env):
-            wandb.save(args.config_env)
+        if config_path and os.path.exists(config_path):
+            wandb.save(config_path)
         if args.config_exp and os.path.exists(args.config_exp):
             wandb.save(args.config_exp)
 

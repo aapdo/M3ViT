@@ -1,5 +1,5 @@
 # ---------- Base scientific stack ----------
-numpy>=1.24.0
+numpy>=1.24.0,<2
 scipy>=1.10.0
 scikit-image>=0.20.0
 matplotlib>=3.7.0
@@ -15,7 +15,11 @@ imageio
 opencv-python==4.6.0.66
 easydict
 termcolor
-mmcv==1.7.1
 thop
 dm-tree
 wandb
+# python -m pip install -U "pip<26" setuptools wheel
+# python -m pip install --force-reinstall "setuptools<70"
+
+# mmcv 빌드 격리 끄고 설치
+# python -m pip install --no-build-isolation mmcv==1.7.1

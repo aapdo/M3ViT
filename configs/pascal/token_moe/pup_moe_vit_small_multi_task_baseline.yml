@@ -54,6 +54,9 @@ backbone_kwargs:
    # moe_experts: 4
    moe_top_k: 2
    gate_dim: 389
+   share_gamma: 0.5
+   bootstrap_share_gamma: 0.3
+   bootstrap_first_moe: True
    gate_return_decoupled_activation: False
    # gate_task_specific_dim: 64
    
@@ -104,4 +107,3 @@ eval_final_10_epochs_only: True
 # If eval_final_10_epochs_only is True, evaluation happens every eval_interval epochs
 # during epochs 0 to (total_epochs - 10), and every epoch during the final 10 epochs
 eval_interval: 10
-

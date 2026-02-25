@@ -52,8 +52,7 @@ psudo python setup.py install
 ## Usage
 ### Setup 
 The following files need to be adapted in order to run the code on your own machine:
-- Change the file paths to the datasets in `utils/mypath.py`, e.g. `/path/to/pascal/`.
-- Specify the output directory in `configs/your_env.yml`. All results will be stored under this directory.
+- Update paths in `configs/path_env.yml` (`root_dir`, `db_root_dir`, `dataset_roots`, `seism_root`).
 - The [seism](https://github.com/jponttuset/seism) repository is needed to perform the edge evaluation.
 - If you want to use the HRNet backbones, please download the pre-trained weights [here](https://github.com/HRNet/HRNet-Image-Classification). 
 The provided config files use an HRNet-18 backbone. Download the `hrnet_w18_small_model_v2.pth` and save it to the directory `./models/pretrained_models/`.
@@ -62,17 +61,18 @@ The datasets will be downloaded automatically to the specified paths when runnin
 
 ### Training
 The configuration files to train the model can be found in the `configs/` directory. The model can be trained by running the following command:
+(`--config_env` is still supported as an alias for backward compatibility.)
 
 To run baseline models including resnet, hrnet
 ```shell
-python main.py --config_env configs/env.yml --config_exp configs/$DATASET/$MODEL.yml
+python main.py --config_path configs/path_env.yml --config_exp configs/$DATASET/$MODEL.yml
 ```
 
 To run models based on vit and vit-moe
 ```shell
-CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port 3350 train_fastmoe.py --config_env configs/env.yml --config_exp configs/$DATASET/vit/$MODEL.yml --save_dir /output_dir 
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port 3350 train_fastmoe.py --config_path configs/path_env.yml --config_exp configs/$DATASET/vit/$MODEL.yml --save_dir /output_dir 
 
-CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port 3350 train_fastmoe.py --config_env configs/env.yml --config_exp configs/$DATASET/vit_moe/$MODEL.yml  --pretrained /home/pretrain_dir  --moe_gate_type "noisy_vmoe"  --moe_experts 16 --moe_top_k 4 --pos_emb_from_pretrained True --backbone_random_init False --vmoe_noisy_std 0 --gate_task_specific_dim -1 --save_dir /home/output_dir --task_one_hot False --multi_gate True --moe_mlp_ratio 1
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port 3350 train_fastmoe.py --config_path configs/path_env.yml --config_exp configs/$DATASET/vit_moe/$MODEL.yml  --pretrained /home/pretrain_dir  --moe_gate_type "noisy_vmoe"  --moe_experts 16 --moe_top_k 4 --pos_emb_from_pretrained True --backbone_random_init False --vmoe_noisy_std 0 --gate_task_specific_dim -1 --save_dir /home/output_dir --task_one_hot False --multi_gate True --moe_mlp_ratio 1
 
 ```
 ### Evaluation

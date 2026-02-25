@@ -11,6 +11,7 @@ import cv2
 import yaml
 from easydict import EasyDict as edict
 from utils.utils import mkdir_if_missing
+from utils.mypath import MyPath
 
 
 def parse_task_dictionary(db_name, task_dictionary):
@@ -95,16 +96,20 @@ def parse_task_dictionary(db_name, task_dictionary):
 
 def create_config(env_file, exp_file, local_rank=0, args=None):
     
-    # Read the files 
-    if args is not None:
-        if args.save_dir is not None:
-            root_dir = args.save_dir
-        else:
-            with open(env_file, 'r') as stream:
-                root_dir = yaml.safe_load(stream)['root_dir']
+    # Read environment/path file once and propagate path settings globally.
+    with open(env_file, 'r') as stream:
+        env_cfg = yaml.safe_load(stream) or {}
+
+    MyPath.set_path_config(env_cfg)
+
+    if args is not None and args.save_dir is not None:
+        root_dir = args.save_dir
     else:
-        with open(env_file, 'r') as stream:
-            root_dir = yaml.safe_load(stream)['root_dir']
+        if 'root_dir' not in env_cfg:
+            raise KeyError('`root_dir` must exist in {}'.format(env_file))
+        root_dir = env_cfg['root_dir']
+
+    root_dir = os.path.expandvars(os.path.expanduser(root_dir))
 
     if args is not None and hasattr(args, 'pretrained') and hasattr(args, 'moe_experts'):
         # Only add MoE-specific subdirectory if MoE arguments are present

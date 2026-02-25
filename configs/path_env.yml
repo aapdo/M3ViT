@@ -1,4 +1,3 @@
-# Deprecated: use configs/path_env.yml instead.
 root_dir: /home/jy/m3vit
 
 db_root_dir: /home/jy/multi_task_datasets

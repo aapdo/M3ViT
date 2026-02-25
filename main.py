@@ -26,8 +26,9 @@ from thop import profile
 import wandb
 # Parser
 parser = argparse.ArgumentParser(description='Vanilla Training')
-parser.add_argument('--config_env',
-                    help='Config file for the environment')
+parser.add_argument('--config_path', '--config_env', dest='config_path',
+                    default='configs/path_env.yml',
+                    help='Config file for path/environment settings')
 parser.add_argument('--config_exp',
                     help='Config file for the experiment')
 parser.add_argument('--flops', action='store_true',
@@ -47,7 +48,10 @@ args = parser.parse_args()
 def main():
     # Retrieve config file
     cv2.setNumThreads(0)
-    p = create_config(args.config_env, args.config_exp, args=args)
+    config_path = args.config_path
+    if config_path == 'configs/path_env.yml' and not os.path.exists(config_path) and os.path.exists('configs/env.yml'):
+        config_path = 'configs/env.yml'
+    p = create_config(config_path, args.config_exp, args=args)
     sys.stdout = Logger(os.path.join(p['output_dir'], 'log_file.txt'))
     print(colored(p, 'red'))
 
@@ -153,8 +157,8 @@ def main():
         wandb_logger.log_config(p, args)
 
         # Save config files to wandb if they exist
-        if args.config_env and os.path.exists(args.config_env):
-            wandb.save(args.config_env)
+        if config_path and os.path.exists(config_path):
+            wandb.save(config_path)
         if args.config_exp and os.path.exists(args.config_exp):
             wandb.save(args.config_exp)
 

@@ -68,8 +68,9 @@ def set_random_seed(seed, deterministic=False):
 parser = argparse.ArgumentParser(description='Vanilla Training')
 parser.add_argument('--trBatch', default=None, type=int, help='moe experts number')
 parser.add_argument('--valBatch', default=None, type=int, help='moe experts number')
-parser.add_argument('--config_env',
-                    help='Config file for the environment')
+parser.add_argument('--config_path', '--config_env', dest='config_path',
+                    default='configs/path_env.yml',
+                    help='Config file for path/environment settings')
 parser.add_argument('--config_exp',
                     help='Config file for the experiment')
 parser.add_argument("--gpus",
@@ -101,7 +102,10 @@ if "LOCAL_RANK" not in os.environ:
 
 def main():
     cv2.setNumThreads(0)
-    p = create_config(args.config_env, args.config_exp, local_rank=args.local_rank)
+    config_path = args.config_path
+    if config_path == 'configs/path_env.yml' and not os.path.exists(config_path) and os.path.exists('configs/env.yml'):
+        config_path = 'configs/env.yml'
+    p = create_config(config_path, args.config_exp, local_rank=args.local_rank)
     # print(os.environ["WORLD_SIZE"])
     if args.trBatch is not None:
         p['trBatch'] = args.trBatch
