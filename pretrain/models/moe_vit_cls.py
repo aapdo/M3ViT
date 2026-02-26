@@ -21,6 +21,7 @@ class MoEViTConfig:
     num_heads: int
     mlp_ratio: float
     qkv_bias: bool
+    distilled: bool
     drop_rate: float
     attn_drop_rate: float
     drop_path_rate: float
@@ -57,7 +58,7 @@ class MoEViTForImageNet(nn.Module):
             qkv_bias=cfg.qkv_bias,
             qk_scale=None,
             representation_size=None,
-            distilled=False,
+            distilled=cfg.distilled,
             drop_rate=cfg.drop_rate,
             attn_drop_rate=cfg.attn_drop_rate,
             drop_path_rate=cfg.drop_path_rate,
@@ -90,8 +91,21 @@ class MoEViTForImageNet(nn.Module):
 
         self.norm = nn.LayerNorm(cfg.embed_dim)
         self.head = nn.Linear(cfg.embed_dim, cfg.num_classes)
+        self.head_dist = nn.Linear(cfg.embed_dim, cfg.num_classes) if cfg.distilled else None
         trunc_normal_(self.head.weight, std=0.02)
         nn.init.zeros_(self.head.bias)
+        if self.head_dist is not None:
+            trunc_normal_(self.head_dist.weight, std=0.02)
+            nn.init.zeros_(self.head_dist.bias)
+
+    def no_weight_decay(self):
+        skip = set()
+        no_wd = getattr(self.encoder, "no_weight_decay", None)
+        if callable(no_wd):
+            no_wd = no_wd()
+        if no_wd is not None:
+            skip.update({f"encoder.{name}" for name in no_wd})
+        return skip
 
     def forward(self, x):
         encoder_out = self.encoder(x)
@@ -103,6 +117,21 @@ class MoEViTForImageNet(nn.Module):
         if tokens.ndim != 3:
             raise RuntimeError(f"Expected token output [B, N, C], got shape {tuple(tokens.shape)}")
 
-        cls = tokens[:, 0]
-        logits = self.head(self.norm(cls))
+        tokens = self.norm(tokens)
+        logits_cls = self.head(tokens[:, 0])
+
+        if self.head_dist is None:
+            return {"logits": logits_cls, "cv_loss": cv_loss}
+
+        if tokens.shape[1] < 2:
+            raise RuntimeError(
+                "Distilled model expects [cls, dist, ...] tokens, got shape "
+                f"{tuple(tokens.shape)}"
+            )
+
+        logits_dist = self.head_dist(tokens[:, 1])
+        if self.training:
+            logits = (logits_cls, logits_dist)
+        else:
+            logits = (logits_cls + logits_dist) / 2
         return {"logits": logits, "cv_loss": cv_loss}

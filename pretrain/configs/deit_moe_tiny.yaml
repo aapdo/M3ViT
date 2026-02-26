@@ -79,7 +79,7 @@ aug_kwargs:
 distillation_kwargs:
   distillation_type: none
   teacher_model: regnety_160
-  teacher_path: ""
+  teacher_path: "https://dl.fbaipublicfiles.com/deit/regnety_160-a5fe301d.pth"
   distillation_alpha: 0.5
   distillation_tau: 1.0
 
@@ -87,6 +87,6 @@ distillation_kwargs:
 seed: 0
 amp: true
 pin_mem: true
-dist_eval: true
+dist_eval: false
 print_freq: 50
 save_freq: 10

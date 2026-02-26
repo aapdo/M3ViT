@@ -28,4 +28,13 @@ def build_scheduler(args, optimizer):
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
 
-    return LambdaLR(optimizer, lr_lambda=lr_lambda)
+    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    # Start epoch-0 with warmup LR (instead of base LR) for DeiT-like behavior.
+    if warmup_epochs > 0:
+        warmup_scale = lr_lambda(0)
+        for group, base_lr_group in zip(optimizer.param_groups, scheduler.base_lrs):
+            group["lr"] = base_lr_group * warmup_scale
+        scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
+
+    return scheduler

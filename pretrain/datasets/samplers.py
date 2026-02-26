@@ -41,6 +41,9 @@ class RASampler(Sampler):
 
         self.num_samples = int(math.ceil(len(self.dataset) * self.num_repeats / self.num_replicas))
         self.total_size = self.num_samples * self.num_replicas
+        self.num_selected_samples = int(
+            math.floor((len(self.dataset) // 256) * 256 / self.num_replicas)
+        )
 
     def __iter__(self):
         g = torch.Generator()
@@ -60,10 +63,10 @@ class RASampler(Sampler):
 
         indices = indices[self.rank : self.total_size : self.num_replicas]
         assert len(indices) == self.num_samples
-        return iter(indices)
+        return iter(indices[: self.num_selected_samples])
 
     def __len__(self):
-        return self.num_samples
+        return self.num_selected_samples
 
     def set_epoch(self, epoch):
         self.epoch = epoch

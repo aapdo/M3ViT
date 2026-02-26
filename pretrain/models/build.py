@@ -58,6 +58,7 @@ def build_model(args):
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         qkv_bias=args.qkv_bias,
+        distilled=getattr(args, "distilled", False),
         drop_rate=args.drop,
         attn_drop_rate=args.attn_drop_rate,
         drop_path_rate=args.drop_path,

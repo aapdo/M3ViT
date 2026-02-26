@@ -12,6 +12,17 @@ import yaml
 from torch.hub import load_state_dict_from_url
 from timm.data import Mixup
 from timm.models import create_model
+try:
+    import fmoe
+except ImportError:
+    fmoe = None
+try:
+    from timm.utils import ModelEma as TimmModelEma
+except ImportError:
+    try:
+        from timm.utils import ModelEmaV2 as TimmModelEma
+    except ImportError:
+        TimmModelEma = None
 
 from pretrain.datasets import build_imagenet_datasets, build_imagenet_loaders
 from pretrain.engine import evaluate, train_one_epoch
@@ -100,6 +111,7 @@ def normalize_config(cfg):
     _set_if_absent(out, "gate_dim", _maybe_get(bn_kwargs, "gate_dim"))
     _set_if_absent(out, "gate_task_specific_dim", _maybe_get(bn_kwargs, "gate_task_specific_dim"))
     _set_if_absent(out, "multi_gate", _maybe_get(bn_kwargs, "multi_gate"))
+    _set_if_absent(out, "distilled", _maybe_get(bn_kwargs, "distilled"))
 
     # img_size can be int or [H, W]. For pretraining we use a square crop.
     img_size = _maybe_get(bn_kwargs, "img_size")
@@ -136,7 +148,37 @@ def normalize_config(cfg):
 
     # Runtime aliases.
     _set_if_absent(out, "pin_mem", _maybe_get(cfg, "pin_memory"))
+    _set_if_absent(out, "fmoe_grouped_ddp", _maybe_get(cfg, "fmoe_grouped_ddp"))
+    _set_if_absent(out, "model_ema", _maybe_get(cfg, "model_ema"))
+    _set_if_absent(out, "model_ema_decay", _maybe_get(cfg, "model_ema_decay"))
+    _set_if_absent(out, "model_ema_force_cpu", _maybe_get(cfg, "model_ema_force_cpu"))
     return out
+
+
+def _sync_grouped_ddp_weights(model, except_key_words):
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return
+
+    state_dict = model.state_dict()
+    for key, item in state_dict.items():
+        if any(key_word in key for key_word in except_key_words):
+            continue
+        if torch.is_tensor(item):
+            torch.distributed.broadcast(item, 0)
+    model.load_state_dict(state_dict)
+
+
+def _resolve_fmoe_grouped_ddp_cls():
+    if fmoe is None:
+        return None
+    cls = getattr(fmoe, "DistributedGroupedDataParallel", None)
+    if cls is not None:
+        return cls
+    try:
+        from fmoe.distributed import DistributedGroupedDataParallel as cls  # type: ignore
+        return cls
+    except Exception:
+        return None
 
 
 def get_args_parser():
@@ -162,6 +204,7 @@ def get_args_parser():
     parser.add_argument("--num-heads", default=-1, type=int)
     parser.add_argument("--mlp-ratio", default=-1.0, type=float)
     parser.add_argument("--qkv-bias", default=True, type=str2bool)
+    parser.add_argument("--distilled", default=False, type=str2bool)
     parser.add_argument("--drop", default=0.0, type=float)
     parser.add_argument("--drop-path", default=0.1, type=float)
     parser.add_argument("--attn-drop-rate", default=0.0, type=float)
@@ -215,7 +258,11 @@ def get_args_parser():
     # distillation (scaffold)
     parser.add_argument("--distillation-type", default="none", choices=["none", "soft", "hard"])
     parser.add_argument("--teacher-model", default="regnety_160", type=str)
-    parser.add_argument("--teacher-path", default="", type=str)
+    parser.add_argument(
+        "--teacher-path",
+        default="https://dl.fbaipublicfiles.com/deit/regnety_160-a5fe301d.pth",
+        type=str,
+    )
     parser.add_argument("--distillation-alpha", default=0.5, type=float)
     parser.add_argument("--distillation-tau", default=1.0, type=float)
 
@@ -225,6 +272,12 @@ def get_args_parser():
     parser.add_argument("--pin-mem", action="store_true", dest="pin_mem")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.add_argument("--amp", default=True, type=str2bool)
+    parser.add_argument("--fmoe-grouped-ddp", action="store_true", dest="fmoe_grouped_ddp")
+    parser.add_argument("--no-fmoe-grouped-ddp", action="store_false", dest="fmoe_grouped_ddp")
+    parser.add_argument("--model-ema", action="store_true", dest="model_ema")
+    parser.add_argument("--no-model-ema", action="store_false", dest="model_ema")
+    parser.add_argument("--model-ema-decay", default=0.99996, type=float)
+    parser.add_argument("--model-ema-force-cpu", action="store_true")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--print-freq", default=10, type=int)
     parser.add_argument("--device", default="cuda", type=str)
@@ -240,7 +293,14 @@ def get_args_parser():
     parser.add_argument("--repeated-aug", action="store_true", dest="repeated_aug")
     parser.add_argument("--no-repeated-aug", action="store_false", dest="repeated_aug")
 
-    parser.set_defaults(pin_mem=True, dist_eval=True, repeated_aug=True)
+    parser.set_defaults(
+        pin_mem=True,
+        dist_eval=False,
+        repeated_aug=True,
+        fmoe_grouped_ddp=True,
+        model_ema=True,
+        model_ema_force_cpu=False,
+    )
     return parser
 
 
@@ -298,6 +358,8 @@ def main():
 
     if args.data_path == "":
         raise ValueError("--data-path is required")
+    if args.distillation_type != "none" and not args.distilled:
+        raise ValueError("--distilled must be true when --distillation-type is soft/hard")
 
     if args.unscale_lr:
         effective_lr = args.lr
@@ -333,14 +395,42 @@ def main():
 
     model = build_model(args)
     model.to(device)
+    model_ema = None
+    if args.model_ema:
+        if TimmModelEma is None:
+            raise ImportError("timm.utils.ModelEma or ModelEmaV2 is required when --model-ema is enabled")
+        model_ema = TimmModelEma(
+            model,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else None,
+        )
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[args.gpu],
-            find_unused_parameters=True,
-        )
-        model_without_ddp = model.module
+        if args.fmoe_grouped_ddp:
+            grouped_ddp_cls = _resolve_fmoe_grouped_ddp_cls()
+            if grouped_ddp_cls is None:
+                raise ImportError(
+                    "fmoe grouped DDP is unavailable but --fmoe-grouped-ddp is enabled. "
+                    "Install a compatible fmoe version or pass --no-fmoe-grouped-ddp."
+                )
+            print("Using fmoe.DistributedGroupedDataParallel")
+            model = grouped_ddp_cls(
+                model,
+                device_ids=[args.gpu],
+                find_unused_parameters=True,
+            )
+            _sync_grouped_ddp_weights(
+                model,
+                except_key_words=("mlp.experts.h4toh", "mlp.experts.htoh4"),
+            )
+        else:
+            print("Using torch.nn.parallel.DistributedDataParallel")
+            model = torch.nn.parallel.DistributedDataParallel(
+                model,
+                device_ids=[args.gpu],
+                find_unused_parameters=True,
+            )
+        model_without_ddp = model.module if hasattr(model, "module") else model
     else:
         model_without_ddp = model
 
@@ -363,6 +453,7 @@ def main():
         optimizer=optimizer,
         scheduler=scheduler,
         scaler=scaler,
+        model_ema=model_ema,
     )
 
     if args.eval:
@@ -389,6 +480,7 @@ def main():
             scaler=scaler,
             mixup_fn=mixup_fn,
             args=args,
+            model_ema=model_ema,
         )
 
         scheduler.step(epoch + 1)
@@ -408,6 +500,7 @@ def main():
             scaler=scaler,
             best_acc1=best_acc1,
             is_best=is_best,
+            model_ema=model_ema,
         )
 
         if is_main_process():
