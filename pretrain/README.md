@@ -49,6 +49,38 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --output-dir /path/to/output
 ```
 
+## DeiT Init Modes
+
+The pretrain entrypoint supports three explicit initialization modes via
+`--deit-init-mode` (alias `--init-mode`):
+
+- `scratch`: random init pretraining (`random_init=True`)
+- `deit_warm_start`: load DeiT weights, keep MoE experts random
+- `deit_upcycling`: load DeiT weights and initialize MoE experts from DeiT MLP
+- `auto`: compatibility mode (maps to `scratch` when `random_init=true`, else `deit_upcycling`)
+
+Examples:
+
+```bash
+# 1) Scratch pretrain
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --deit-init-mode scratch \
+  --output-dir /path/to/output
+
+# 2) DeiT warm-start pretrain
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --deit-init-mode deit_warm_start \
+  --output-dir /path/to/output
+
+# 3) DeiT upcycling pretrain
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --deit-init-mode deit_upcycling \
+  --output-dir /path/to/output
+```
+
 If you have train_fastmoe-style shard directory (`0.pth`, `1.pth`, ...):
 
 ```bash

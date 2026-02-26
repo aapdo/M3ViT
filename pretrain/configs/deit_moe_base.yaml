@@ -48,6 +48,7 @@ backbone_kwargs:
   drop_path_rate: 0.1
 
   random_init: true
+  deit_init_mode: scratch
   distilled: false
   moe_mlp_ratio: 2.0
   moe_experts: 16

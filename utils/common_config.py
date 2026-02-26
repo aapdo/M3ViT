@@ -184,6 +184,7 @@ def get_backbone(p, args=None):
                 print("experts number of {} is not divisible by world size of {}".format(args.moe_experts, moe_world_size))
             args.moe_experts = args.moe_experts // moe_world_size
         set_upcycling_runtime_options({
+            "deit_init_mode": str(getattr(args, "deit_init_mode", "deit_upcycling")),
             "use_virtual_group_initialization": bool(getattr(args, "use_virtual_group_initialization", False)),
             "use_weight_scaling": bool(getattr(args, "use_weight_scaling", False)),
             "moe_top_k": bn_args.get("moe_top_k", None),
@@ -229,6 +230,7 @@ def get_backbone(p, args=None):
                 print("experts number of {} is not divisible by world size of {}".format(args.moe_experts, moe_world_size))
             args.moe_experts = args.moe_experts // moe_world_size
         set_upcycling_runtime_options({
+            "deit_init_mode": str(getattr(args, "deit_init_mode", "deit_upcycling")),
             "use_virtual_group_initialization": bool(getattr(args, "use_virtual_group_initialization", False)),
             "use_weight_scaling": bool(getattr(args, "use_weight_scaling", False)),
             "moe_top_k": bn_args.get("moe_top_k", None),
