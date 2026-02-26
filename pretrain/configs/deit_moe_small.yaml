@@ -52,7 +52,7 @@ backbone_kwargs:
   distilled: false
   moe_mlp_ratio: 1.0
   moe_experts: 16
-  moe_top_k: 2
+  moe_top_k: 4
   gate_dim: -1
   gate_task_specific_dim: -1
   multi_gate: false

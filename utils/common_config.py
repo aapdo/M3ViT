@@ -217,6 +217,85 @@ def get_backbone(p, args=None):
                                         gate_input_ahead = args.gate_input_ahead,regu_sem=args.regu_sem,sem_force=args.sem_force,regu_subimage=args.regu_subimage,expert_prune = args.expert_prune)
         linear_keyword = 'head'
         backbone_channels = 2048
+        if args is not None and args.pretrained:
+            if os.path.isfile(args.pretrained) or os.path.isdir(args.pretrained):
+                print("=> loading checkpoint '{}'".format(args.pretrained))
+                if os.path.isfile(args.pretrained):
+                    checkpoint = torch.load(args.pretrained, map_location="cpu")
+                    moe_dir_read = False
+                elif os.path.isdir(args.pretrained):
+                    checkpoint = torch.load(
+                        os.path.join(
+                            args.pretrained,
+                            "0.pth".format(torch.distributed.get_rank())
+                        ),
+                        map_location="cpu",
+                    )
+                    len_save = len([f for f in os.listdir(args.pretrained) if "pth" in f])
+                    print('===========number of moe loaded from pretrain======', len_save)
+                    assert len_save % torch.distributed.get_world_size() == 0
+                    response_cnt = [i for i in range(
+                        torch.distributed.get_rank() * (len_save // torch.distributed.get_world_size()),
+                        (torch.distributed.get_rank() + 1) * (len_save // torch.distributed.get_world_size())
+                    )]
+                    # merge all ckpts
+                    for cnt, cnt_model in enumerate(response_cnt):
+                        if cnt_model != 0:
+                            checkpoint_specific = torch.load(
+                                os.path.join(args.pretrained, "{}.pth".format(cnt_model)),
+                                map_location="cpu",
+                            )
+                            if cnt != 0:
+                                for key, item in checkpoint_specific["state_dict"].items():
+                                    checkpoint["state_dict"][key] = torch.cat(
+                                        [checkpoint["state_dict"][key], item], dim=0
+                                    )
+                            else:
+                                checkpoint["state_dict"].update(checkpoint_specific["state_dict"])
+                        moe_dir_read = True
+                else:
+                    raise ValueError("Model {} do not exist".format(args.pretrained))
+
+                if "mae" in args.pretrained and "model" in checkpoint:
+                    state_dict = checkpoint["model"]
+                    args.start_epoch = 0
+                    msg = backbone.load_state_dict(state_dict, strict=False)
+                    assert set(msg.missing_keys) == {"%s.weight" % linear_keyword, "%s.bias" % linear_keyword}
+                elif os.path.isfile(args.pretrained) and (not args.moe_data_distributed):
+                    state_dict = checkpoint['state_dict']
+                    if torch.distributed.is_available() and torch.distributed.is_initialized():
+                        runtime_world_size = torch.distributed.get_world_size()
+                    else:
+                        runtime_world_size = 1
+                    validate_single_file_moe_checkpoint_or_raise(
+                        checkpoint=checkpoint,
+                        state_dict=state_dict,
+                        local_experts=args.moe_experts,
+                        world_size=runtime_world_size,
+                        checkpoint_path=args.pretrained,
+                    )
+                    if args.moe_use_gate:
+                        backbone = cvt_state_dict_moe_gate(
+                            state_dict, backbone, p, args, linear_keyword, backbone.h, backbone.w
+                        )
+                    else:
+                        backbone = cvt_state_dict(
+                            state_dict, backbone, p, args, linear_keyword, moe_dir_read, backbone.h, backbone.w
+                        )
+                elif args.moe_use_gate:
+                    state_dict = checkpoint['state_dict']
+                    backbone = cvt_state_dict_moe_gate(
+                        state_dict, backbone, p, args, linear_keyword, backbone.h, backbone.w
+                    )
+                else:
+                    state_dict = checkpoint['state_dict']
+                    backbone = cvt_state_dict(
+                        state_dict, backbone, p, args, linear_keyword, moe_dir_read, backbone.h, backbone.w
+                    )
+
+                print("=> loaded pre-trained model '{}'".format(args.pretrained))
+            else:
+                raise ValueError("=> no checkpoint found at '{}'".format(args.pretrained))
 
     elif p['backbone'] == 'Token_VisionTransformer_moe':
         from models.token_vision_transformer_moe import TokenVisionTransformerMoE
@@ -292,68 +371,6 @@ def get_backbone(p, args=None):
     else:
         raise NotImplementedError
     print('backbone', backbone)
-    if args is not None:
-        if args.pretrained:
-            if os.path.isfile(args.pretrained) or os.path.isdir(args.pretrained):
-                print("=> loading checkpoint '{}'".format(args.pretrained))
-                if os.path.isfile(args.pretrained):
-                    checkpoint = torch.load(args.pretrained, map_location="cpu")
-                    moe_dir_read = False
-                elif os.path.isdir(args.pretrained):
-                    checkpoint = torch.load(os.path.join(args.pretrained, "0.pth".format(torch.distributed.get_rank())), map_location="cpu")
-                    # len_save = min(len([f for f in os.listdir(args.pretrained) if "pth" in f]),int(args.moe_experts * torch.distributed.get_world_size()))
-                    len_save = len([f for f in os.listdir(args.pretrained) if "pth" in f])
-                    print('===========number of moe loaded from pretrain======',len_save)
-                    assert len_save % torch.distributed.get_world_size() == 0
-                    response_cnt = [i for i in range(torch.distributed.get_rank() * (len_save // torch.distributed.get_world_size()),
-                                                    (torch.distributed.get_rank() + 1) * (len_save // torch.distributed.get_world_size()))]
-                    # merge all ckpts
-                    for cnt, cnt_model in enumerate(response_cnt):
-                        if cnt_model != 0:
-                            checkpoint_specific = torch.load(os.path.join(args.pretrained, "{}.pth".format(cnt_model)), map_location="cpu")
-                            if cnt != 0:
-                                for key, item in checkpoint_specific["state_dict"].items():
-                                    checkpoint["state_dict"][key] = torch.cat([checkpoint["state_dict"][key], item], dim=0)
-                            else:
-                                checkpoint["state_dict"].update(checkpoint_specific["state_dict"])
-                        moe_dir_read = True
-                else:
-                    raise ValueError("Model {} do not exist".format(args.pretrained))
-
-                if "mae" in args.pretrained and "model" in checkpoint:
-                    state_dict = checkpoint["model"]
-                    args.start_epoch = 0
-                    msg = backbone.load_state_dict(state_dict, strict=False)
-                    assert set(msg.missing_keys) == {"%s.weight" % linear_keyword, "%s.bias" % linear_keyword}
-                elif os.path.isfile(args.pretrained) and (
-                    p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe'
-                ) and (not args.moe_data_distributed):
-                    state_dict = checkpoint['state_dict']
-                    if torch.distributed.is_available() and torch.distributed.is_initialized():
-                        runtime_world_size = torch.distributed.get_world_size()
-                    else:
-                        runtime_world_size = 1
-                    validate_single_file_moe_checkpoint_or_raise(
-                        checkpoint=checkpoint,
-                        state_dict=state_dict,
-                        local_experts=args.moe_experts,
-                        world_size=runtime_world_size,
-                        checkpoint_path=args.pretrained,
-                    )
-                    if args.moe_use_gate:
-                        backbone = cvt_state_dict_moe_gate(state_dict, backbone, p, args, linear_keyword,backbone.h, backbone.w)
-                    else:
-                        backbone = cvt_state_dict(state_dict, backbone, p, args, linear_keyword, moe_dir_read, backbone.h, backbone.w)
-                elif args.moe_use_gate:
-                    state_dict = checkpoint['state_dict']
-                    backbone = cvt_state_dict_moe_gate(state_dict, backbone, p, args, linear_keyword,backbone.h, backbone.w)
-                else:
-                    state_dict = checkpoint['state_dict']
-                    backbone = cvt_state_dict(state_dict, backbone, p, args, linear_keyword, moe_dir_read, backbone.h, backbone.w)
-
-                print("=> loaded pre-trained model '{}'".format(args.pretrained))
-            else:
-                raise ValueError("=> no checkpoint found at '{}'".format(args.pretrained))
 
     if p['backbone_kwargs']['dilated']: # Add dilated convolutions
         assert(p['backbone'] in ['resnet18', 'resnet50'])
