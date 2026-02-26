@@ -49,6 +49,21 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --output-dir /path/to/output
 ```
 
+V-MoE-style recipe (adapted to this codebase):
+
+```bash
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/vmoe_style_moe_small.yaml \
+  --config-path configs/path_env.yml \
+  --dataset-name ImageNet1K \
+  --output-dir /path/to/output
+```
+
+Available V-MoE-style presets:
+- `pretrain/configs/vmoe_style_moe_tiny.yaml`
+- `pretrain/configs/vmoe_style_moe_small.yaml`
+- `pretrain/configs/vmoe_style_moe_base.yaml`
+
 ## DeiT Init Modes
 
 The pretrain entrypoint supports three explicit initialization modes via
