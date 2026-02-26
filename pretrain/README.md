@@ -49,6 +49,16 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --config-path configs/path_env.yml \
   --dataset-name ImageNet1K \
   --output-dir /path/to/output
+
+# Enable Weights & Biases logging
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --config-path configs/path_env.yml \
+  --dataset-name ImageNet1K \
+  --output-dir /path/to/output \
+  --use-wandb \
+  --wandb-project m3vit-pretrain \
+  --wandb-name deit_moe_small
 ```
 
 If that local path does not contain `train/` and `val/`, the loader will
@@ -136,6 +146,7 @@ python pretrain/export_to_mtl.py \
 - `--dev-test true` runs one validation pass before the training loop starts.
 - Model construction `__init__` arguments are logged via `patch_and_log_initializations` by default (`--log-initializations true`).
 - `--output-dir` is treated as a base path; each run writes into a timestamped subdirectory (`MMDD_HHMM`).
+- W&B options: `--use-wandb`, `--wandb-project`, `--wandb-entity`, `--wandb-name`, `--wandb-mode [online|offline|disabled]`.
 - Single-file rank-local MoE checkpoints are intentionally rejected by the MTL loader.
   If a checkpoint was produced in multi-GPU mode and only one local file is available,
   it cannot be fully reconstructed; use the full shard directory export path.

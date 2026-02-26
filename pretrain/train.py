@@ -177,6 +177,19 @@ def normalize_config(cfg):
     _set_if_absent(out, "model_ema", _maybe_get(cfg, "model_ema"))
     _set_if_absent(out, "model_ema_decay", _maybe_get(cfg, "model_ema_decay"))
     _set_if_absent(out, "model_ema_force_cpu", _maybe_get(cfg, "model_ema_force_cpu"))
+
+    # Wandb section.
+    wandb_kwargs = _maybe_get(cfg, "wandb_kwargs") or {}
+    _set_if_absent(out, "use_wandb", _maybe_get(cfg, "use_wandb"))
+    _set_if_absent(out, "use_wandb", _maybe_get(wandb_kwargs, "use_wandb"))
+    _set_if_absent(out, "wandb_project", _maybe_get(cfg, "wandb_project"))
+    _set_if_absent(out, "wandb_project", _maybe_get(wandb_kwargs, "project"))
+    _set_if_absent(out, "wandb_entity", _maybe_get(cfg, "wandb_entity"))
+    _set_if_absent(out, "wandb_entity", _maybe_get(wandb_kwargs, "entity"))
+    _set_if_absent(out, "wandb_name", _maybe_get(cfg, "wandb_name"))
+    _set_if_absent(out, "wandb_name", _maybe_get(wandb_kwargs, "name"))
+    _set_if_absent(out, "wandb_mode", _maybe_get(cfg, "wandb_mode"))
+    _set_if_absent(out, "wandb_mode", _maybe_get(wandb_kwargs, "mode"))
     return out
 
 
@@ -404,6 +417,12 @@ def get_args_parser():
     parser.add_argument("--print-freq", default=10, type=int)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--log-initializations", default=True, type=str2bool)
+    parser.add_argument("--use-wandb", action="store_true", dest="use_wandb")
+    parser.add_argument("--no-wandb", action="store_false", dest="use_wandb")
+    parser.add_argument("--wandb-project", default="m3vit-pretrain", type=str)
+    parser.add_argument("--wandb-entity", default=None, type=str)
+    parser.add_argument("--wandb-name", default="", type=str)
+    parser.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
 
     # distributed
     parser.add_argument("--world-size", default=1, type=int)
@@ -423,6 +442,7 @@ def get_args_parser():
         fmoe_grouped_ddp=True,
         model_ema=True,
         model_ema_force_cpu=False,
+        use_wandb=False,
     )
     return parser
 
@@ -569,6 +589,50 @@ def _patch_model_initialization_logging(args):
         return [], {}
 
 
+def _build_wandb_logger(args):
+    if not bool(getattr(args, "use_wandb", False)):
+        return None
+    if not is_main_process():
+        return None
+
+    wandb_mode = str(getattr(args, "wandb_mode", "online") or "online").strip().lower()
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        raise ValueError(f"Unsupported --wandb-mode '{wandb_mode}'. Use one of: online/offline/disabled")
+    if wandb_mode == "disabled":
+        return None
+
+    try:
+        import wandb  # type: ignore
+        from utils.wandb_logger import WandbLogger, set_wandb_logger
+    except Exception as exc:
+        raise ImportError(
+            "W&B logging requires wandb. Install with `pip install wandb` "
+            "or disable with `--no-wandb`."
+        ) from exc
+
+    os.environ["WANDB_MODE"] = wandb_mode
+    run_name = str(getattr(args, "wandb_name", "") or "").strip()
+    if not run_name:
+        run_name = os.path.basename(os.path.normpath(args.output_dir))
+
+    wandb_logger = WandbLogger(enabled=True)
+    wandb_logger.init(
+        project=str(getattr(args, "wandb_project", "m3vit-pretrain") or "m3vit-pretrain"),
+        entity=getattr(args, "wandb_entity", None),
+        name=run_name,
+        config=vars(args),
+    )
+    set_wandb_logger(wandb_logger)
+    if wandb_logger.run is not None:
+        wandb_logger.run.config.update({"output_dir": args.output_dir}, allow_val_change=True)
+
+    for path in (args.config_path, args.config, os.path.join(args.output_dir, "run_args.json")):
+        if path and os.path.exists(path):
+            wandb.save(path)
+    print(f"W&B enabled: project={args.wandb_project}, run={run_name}, mode={wandb_mode}")
+    return wandb_logger
+
+
 def main():
     args = parse_args()
     if int(args.eval_freq) < 1:
@@ -612,6 +676,7 @@ def main():
     if is_main_process():
         print(f"Resolved output dir: {args.output_dir}")
     _dump_run_metadata(args)
+    wandb_logger = _build_wandb_logger(args)
 
     dataset_train, dataset_val, nb_classes = build_imagenet_datasets(args)
     args.nb_classes = nb_classes
@@ -701,13 +766,18 @@ def main():
 
     if args.eval:
         test_stats = evaluate(loader_val, model, device, args)
+        if wandb_logger is not None:
+            wandb_logger.log({f"eval/{k}": v for k, v in test_stats.items()})
+            wandb_logger.finish()
         print(f"Eval only: Acc@1={test_stats['acc1']:.3f} Acc@5={test_stats['acc5']:.3f}")
         return
 
     if args.dev_test:
         if is_main_process():
             print("Run one pre-flight validation (--dev-test=true)")
-        _ = evaluate(loader_val, model, device, args)
+        dev_stats = evaluate(loader_val, model, device, args)
+        if wandb_logger is not None:
+            wandb_logger.log({f"preflight/{k}": v for k, v in dev_stats.items()})
 
     print("Start training")
     start_time = time.time()
@@ -770,10 +840,23 @@ def main():
                 log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+            if wandb_logger is not None:
+                wandb_metrics = {
+                    "epoch": epoch + 1,
+                    "best_acc1": float(best_acc1),
+                    "n_parameters": log_stats["n_parameters"],
+                    "eval_performed": bool(do_eval),
+                }
+                wandb_metrics.update({f"train/{k}": v for k, v in train_stats.items()})
+                if do_eval:
+                    wandb_metrics.update({f"eval/{k}": v for k, v in test_stats.items()})
+                wandb_logger.log(wandb_metrics)
 
     total_time = time.time() - start_time
     total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
     print(f"Training time {total_time_str}")
+    if wandb_logger is not None:
+        wandb_logger.finish()
 
 
 if __name__ == "__main__":
