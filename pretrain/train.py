@@ -68,6 +68,7 @@ def normalize_config(cfg):
     # Baseline-style dataloader keys.
     _set_if_absent(out, "batch_size", _maybe_get(cfg, "trBatch"))
     _set_if_absent(out, "workers", _maybe_get(cfg, "nworkers"))
+    _set_if_absent(out, "dataset_name", _maybe_get(cfg, "train_db_name"))
 
     # Optimizer/scheduler sections.
     _set_if_absent(out, "opt", _maybe_get(cfg, "optimizer"))
@@ -181,16 +182,48 @@ def _resolve_fmoe_grouped_ddp_cls():
         return None
 
 
+def _resolve_env_config_path(config_path):
+    if not config_path:
+        return ""
+    if config_path == "configs/path_env.yml" and not os.path.exists(config_path) and os.path.exists("configs/env.yml"):
+        return "configs/env.yml"
+    return config_path
+
+
+def _resolve_data_path_from_env(args):
+    if getattr(args, "data_path", ""):
+        return
+
+    env_cfg_path = _resolve_env_config_path(getattr(args, "config_path", ""))
+    if not env_cfg_path or not os.path.exists(env_cfg_path):
+        return
+
+    with open(env_cfg_path, "r", encoding="utf-8") as f:
+        env_cfg = yaml.safe_load(f) or {}
+
+    dataset_roots = env_cfg.get("dataset_roots", {}) or {}
+    dataset_name = (
+        getattr(args, "dataset_name", None)
+        or getattr(args, "train_db_name", None)
+        or "ImageNet1K"
+    )
+    data_path = dataset_roots.get(dataset_name, "")
+    if data_path:
+        args.data_path = os.path.expandvars(os.path.expanduser(str(data_path)))
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser("MoE ViT ImageNet pretrain", add_help=False)
 
     # config / io
     parser.add_argument("--config", default="", type=str)
+    parser.add_argument("--config-path", "--config-env", dest="config_path", default="configs/path_env.yml", type=str)
     parser.add_argument("--data-path", default="", type=str)
     parser.add_argument("--output-dir", default="./output/pretrain", type=str)
     parser.add_argument("--resume", default="", type=str)
     parser.add_argument("--save-freq", default=10, type=int)
     parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--dataset-name", default="ImageNet1K", type=str)
 
     # model
     parser.add_argument("--model", default="moe_vit_small", type=str)
@@ -307,6 +340,7 @@ def get_args_parser():
 def parse_args():
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", default="", type=str)
+    config_parser.add_argument("--config-path", "--config-env", dest="config_path", default="configs/path_env.yml", type=str)
     cfg_args, remaining = config_parser.parse_known_args()
 
     parser = argparse.ArgumentParser(
@@ -321,6 +355,7 @@ def parse_args():
 
     args = parser.parse_args(remaining)
     args.config = cfg_args.config
+    args.config_path = _resolve_env_config_path(cfg_args.config_path)
     return args
 
 
@@ -355,9 +390,13 @@ def build_teacher_model(args, device):
 def main():
     args = parse_args()
     init_distributed_mode(args)
+    _resolve_data_path_from_env(args)
 
     if args.data_path == "":
-        raise ValueError("--data-path is required")
+        raise ValueError(
+            "--data-path is required (or set dataset_roots.ImageNet1K in "
+            f"{args.config_path} and use --dataset-name ImageNet1K)"
+        )
     if args.distillation_type != "none" and not args.distilled:
         raise ValueError("--distilled must be true when --distillation-type is soft/hard")
 
