@@ -39,6 +39,16 @@ python pretrain/export_to_mtl.py \
   --output /path/to/output/mtl_pretrained.pth
 ```
 
+If `configs/path_env.yml` contains `dataset_roots.ImageNet1K`, you can omit `--data-path`:
+
+```bash
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --config-path configs/path_env.yml \
+  --dataset-name ImageNet1K \
+  --output-dir /path/to/output
+```
+
 If you have train_fastmoe-style shard directory (`0.pth`, `1.pth`, ...):
 
 ```bash
