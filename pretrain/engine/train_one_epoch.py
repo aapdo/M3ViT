@@ -17,6 +17,7 @@ def train_one_epoch(
     scaler,
     mixup_fn,
     args,
+    model_ema=None,
 ):
     model.train(True)
     metric_logger = MetricLogger(delimiter="  ")
@@ -53,6 +54,8 @@ def train_one_epoch(
 
         scaler.step(optimizer)
         scaler.update()
+        if model_ema is not None:
+            model_ema.update(model)
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])

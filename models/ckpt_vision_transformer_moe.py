@@ -301,7 +301,8 @@ class PatchEmbed(nn.Module):
         patch_size = to_2tuple(patch_size)
         num_patches = (img_size[1] // patch_size[1]) * \
             (img_size[0] // patch_size[0])
-        self.img_size = img_size
+        # Accept either int or tuple input size.
+        self.img_size = to_2tuple(img_size)
         self.patch_size = patch_size
         self.num_patches = num_patches
 
@@ -327,7 +328,7 @@ class HybridEmbed(nn.Module):
         super().__init__()
         assert isinstance(backbone, nn.Module)
         img_size = to_2tuple(img_size)
-        self.img_size = img_size
+        self.img_size = to_2tuple(img_size)
         self.backbone = backbone
         if feature_size is None:
             with torch.no_grad():
@@ -544,7 +545,7 @@ class VisionTransformerMoE(nn.Module):
         super(VisionTransformerMoE, self).__init__(**kwargs)
         # print(hybrid_backbone is None)
         self.model_name = model_name
-        self.img_size = img_size
+        self.img_size = to_2tuple(img_size)
         self.patch_size = patch_size
         self.in_chans = in_chans
         self.num_features = self.embed_dim = embed_dim
@@ -563,8 +564,8 @@ class VisionTransformerMoE(nn.Module):
         self.pos_embed_interp = pos_embed_interp
         self.random_init = random_init
         self.align_corners = align_corners
-        self.h = int(self.img_size[0]/self.patch_size)
-        self.w = int(self.img_size[1]/self.patch_size)
+        self.h = int(self.img_size[0] / self.patch_size)
+        self.w = int(self.img_size[1] / self.patch_size)
 
         self.num_stages = self.depth
         # Only keep the last stage output to save memory (decoder only uses the last one)
@@ -595,7 +596,7 @@ class VisionTransformerMoE(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if distilled else None
         self.pos_embed = nn.Parameter(torch.zeros(
-            1, self.num_patches + 1, self.embed_dim))
+            1, self.num_patches + self.num_token, self.embed_dim))
         self.pos_drop = nn.Dropout(p=self.drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate,
@@ -670,11 +671,18 @@ class VisionTransformerMoE(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
-        self.default_cfg = default_cfgs[self.model_name]
-        load_pretrained_pos_emb(self, num_classes=self.num_classes, in_chans=self.in_chans, pos_embed_interp=self.pos_embed_interp,
-        num_patches=self.patch_embed.num_patches, align_corners=self.align_corners, img_h=self.h, img_w=self.w)
         if not self.random_init:
             self.default_cfg = default_cfgs[self.model_name]
+            load_pretrained_pos_emb(
+                self,
+                num_classes=self.num_classes,
+                in_chans=self.in_chans,
+                pos_embed_interp=self.pos_embed_interp,
+                num_patches=self.patch_embed.num_patches,
+                align_corners=self.align_corners,
+                img_h=self.h,
+                img_w=self.w,
+            )
             if self.model_name in ['vit_small_patch16_224', 'vit_base_patch16_224']:
                 load_pretrained(self, num_classes=self.num_classes, in_chans=self.in_chans, pos_embed_interp=self.pos_embed_interp,
                                 num_patches=self.patch_embed.num_patches, align_corners=self.align_corners, filter_fn=self._conv_filter, img_h=self.h, img_w=self.w)
@@ -687,7 +695,10 @@ class VisionTransformerMoE(nn.Module):
 
     @property
     def no_weight_decay(self):
-        return {'pos_embed', 'cls_token'}
+        no_wd = {'pos_embed', 'cls_token'}
+        if self.dist_token is not None:
+            no_wd.add('dist_token')
+        return no_wd
 
     def _conv_filter(self, state_dict, patch_size=16):
         """ convert patch embedding weight from manual patchify + linear proj to conv"""
@@ -732,7 +743,11 @@ class VisionTransformerMoE(nn.Module):
         x = self.patch_embed(x)
         x = x.flatten(2).transpose(1, 2)
         cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
+        if self.dist_token is not None:
+            dist_tokens = self.dist_token.expand(B, -1, -1)
+            x = torch.cat((cls_tokens, dist_tokens, x), dim=1)
+        else:
+            x = torch.cat((cls_tokens, x), dim=1)
         x = x + self.pos_embed
         x = self.pos_drop(x)
 

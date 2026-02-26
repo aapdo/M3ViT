@@ -204,6 +204,53 @@ def load_state_dict_from_url(url, model_dir=None, file_name=None, check_hash=Fal
         state_dict = torch.load(cached_file, map_location=map_location)
     return state_dict
 
+
+def _infer_num_prefix_tokens(pos_embed):
+    total_tokens = int(pos_embed.shape[1])
+    for num_prefix_tokens in (2, 1, 0):
+        num_patch_tokens = total_tokens - num_prefix_tokens
+        if num_patch_tokens <= 0:
+            continue
+        side = int(math.sqrt(num_patch_tokens))
+        if side * side == num_patch_tokens:
+            return num_prefix_tokens
+    return 1
+
+
+def _target_num_prefix_tokens(model, num_patches):
+    pos_embed = getattr(model, "pos_embed", None)
+    if isinstance(pos_embed, torch.Tensor):
+        target = int(pos_embed.shape[1]) - int(num_patches)
+        if target >= 0:
+            return target
+    num_token = getattr(model, "num_token", None)
+    if num_token is not None:
+        return int(num_token)
+    return 1
+
+
+def _adapt_prefix_tokens(prefix_tokens, target_prefix_tokens):
+    _, source_prefix_tokens, channels = prefix_tokens.shape
+    if source_prefix_tokens == target_prefix_tokens:
+        return prefix_tokens
+    if source_prefix_tokens > target_prefix_tokens:
+        return prefix_tokens[:, :target_prefix_tokens]
+
+    if source_prefix_tokens > 0:
+        cls_token = prefix_tokens[:, :1]
+    else:
+        cls_token = prefix_tokens.new_zeros((prefix_tokens.shape[0], 1, channels))
+    extra = cls_token.expand(-1, target_prefix_tokens - source_prefix_tokens, -1)
+    return torch.cat((prefix_tokens, extra), dim=1)
+
+
+def _align_pos_embed_prefix_tokens(pos_embed, target_prefix_tokens):
+    source_prefix_tokens = _infer_num_prefix_tokens(pos_embed)
+    prefix_tokens = pos_embed[:, :source_prefix_tokens]
+    patch_tokens = pos_embed[:, source_prefix_tokens:]
+    prefix_tokens = _adapt_prefix_tokens(prefix_tokens, target_prefix_tokens)
+    return torch.cat((prefix_tokens, patch_tokens), dim=1)
+
 def load_pretrained_pos_emb(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=None, strict=True, pos_embed_interp=False, num_patches=576, align_corners=False, img_h=None, img_w=None):
     if cfg is None:
         cfg = getattr(model, 'default_cfg')
@@ -226,12 +273,18 @@ def load_pretrained_pos_emb(model, cfg=None, num_classes=1000, in_chans=3, filte
     for key, item in state_dict.items():
         if "pos_embed" in key:
             pos_emb_state_dict[key] = state_dict[key]
+    if "pos_embed" not in pos_emb_state_dict:
+        return
+
+    target_prefix_tokens = _target_num_prefix_tokens(model, num_patches)
     
     if pos_embed_interp:
         # print('loaded pos_embed shape',pos_emb_state_dict['pos_embed'].shape)
-        n, c, hw = pos_emb_state_dict['pos_embed'].transpose(1, 2).shape
+        source_pos_embed = pos_emb_state_dict['pos_embed']
+        source_prefix_tokens = _infer_num_prefix_tokens(source_pos_embed)
+        n, c, hw = source_pos_embed.transpose(1, 2).shape
         h = w = int(math.sqrt(hw))
-        pos_embed_weight = pos_emb_state_dict['pos_embed'][:, (-h * w):]
+        pos_embed_weight = source_pos_embed[:, (-h * w):]
         pos_embed_weight = pos_embed_weight.transpose(1, 2)
         n, c, hw = pos_embed_weight.shape
         h = w = int(math.sqrt(hw))
@@ -245,10 +298,14 @@ def load_pretrained_pos_emb(model, cfg=None, num_classes=1000, in_chans=3, filte
         # print('after interpolation', pos_embed_weight.shape)
         pos_embed_weight = pos_embed_weight.view(n, c, -1).transpose(1, 2)
 
-        cls_token_weight = pos_emb_state_dict['pos_embed'][:, 0].unsqueeze(1)
-        # print('cls_token_weight', cls_token_weight.shape)
+        prefix_tokens = source_pos_embed[:, :source_prefix_tokens]
+        prefix_tokens = _adapt_prefix_tokens(prefix_tokens, target_prefix_tokens)
         pos_emb_state_dict['pos_embed'] = torch.cat(
-            (cls_token_weight, pos_embed_weight), dim=1)
+            (prefix_tokens, pos_embed_weight), dim=1)
+    else:
+        pos_emb_state_dict["pos_embed"] = _align_pos_embed_prefix_tokens(
+            pos_emb_state_dict["pos_embed"], target_prefix_tokens
+        )
     strict = False
     msg = model.load_state_dict(pos_emb_state_dict, strict=strict)
     print('=========pos emb is loaded from ================',cfg['url'])
@@ -327,12 +384,15 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
         del state_dict[classifier_name + '.bias']
         strict = False
 
+    target_prefix_tokens = _target_num_prefix_tokens(model, num_patches)
     if pos_embed_interp:
         print('loaded pos_embed shape',state_dict['pos_embed'].shape)
+        source_pos_embed = state_dict["pos_embed"]
+        source_prefix_tokens = _infer_num_prefix_tokens(source_pos_embed)
         # print(f"[Pretrained] before interp vit_state_dict['pos_embed'] (flattened): {state_dict['pos_embed'].flatten().tolist()}")
-        n, c, hw = state_dict['pos_embed'].transpose(1, 2).shape
+        n, c, hw = source_pos_embed.transpose(1, 2).shape
         h = w = int(math.sqrt(hw))
-        pos_embed_weight = state_dict['pos_embed'][:, (-h * w):]
+        pos_embed_weight = source_pos_embed[:, (-h * w):]
         pos_embed_weight = pos_embed_weight.transpose(1, 2)
         n, c, hw = pos_embed_weight.shape
         h = w = int(math.sqrt(hw))
@@ -346,11 +406,16 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
         print('after interpolation', pos_embed_weight.shape)
         pos_embed_weight = pos_embed_weight.view(n, c, -1).transpose(1, 2)
 
-        cls_token_weight = state_dict['pos_embed'][:, 0].unsqueeze(1)
-        print('cls_token_weight', cls_token_weight.shape)
+        prefix_tokens = source_pos_embed[:, :source_prefix_tokens]
+        prefix_tokens = _adapt_prefix_tokens(prefix_tokens, target_prefix_tokens)
+        print('prefix_tokens', prefix_tokens.shape)
         state_dict['pos_embed'] = torch.cat(
-            (cls_token_weight, pos_embed_weight), dim=1)
+            (prefix_tokens, pos_embed_weight), dim=1)
         # print(f"[Pretrained] after interp vit_state_dict['pos_embed'] (flattened): {state_dict['pos_embed'].flatten().tolist()}")
+    elif "pos_embed" in state_dict:
+        state_dict["pos_embed"] = _align_pos_embed_prefix_tokens(
+            state_dict["pos_embed"], target_prefix_tokens
+        )
 
     check = False
     if check:
