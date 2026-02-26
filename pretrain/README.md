@@ -49,6 +49,10 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --output-dir /path/to/output
 ```
 
+If that local path does not contain `train/` and `val/`, the loader will
+automatically bootstrap ImageNet-1k from Hugging Face (`ILSVRC/imagenet-1k`)
+and materialize it into that same local path as an `ImageFolder` layout.
+
 Hugging Face auto-download is also supported by setting a HF dataset URI:
 
 ```bash
@@ -56,7 +60,6 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --config pretrain/configs/deit_moe_small.yaml \
   --config-path configs/path_env.yml \
   --data-path hf://ILSVRC/imagenet-1k \
-  --hf-cache-dir /path/to/hf_cache \
   --output-dir /path/to/output
 ```
 
@@ -64,6 +67,7 @@ Notes:
 - Make sure you already have access to the gated dataset on Hugging Face.
 - Token is read from `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` environment variables.
 - If `configs/path_env.yml` has `huggingface_access_token`, it is auto-injected into those env vars.
+- Install dependencies first: `pip install -U "datasets[vision]" huggingface_hub`.
 
 V-MoE-style recipe (adapted to this codebase):
 
