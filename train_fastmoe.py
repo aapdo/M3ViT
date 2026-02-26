@@ -126,6 +126,8 @@ parser.add_argument('--task_one_hot',default=False, type=str2bool, help='whether
 parser.add_argument('--multi_gate',default=False, type=str2bool, help='whether use Multi gate MoE')
 
 parser.add_argument('--eval', action='store_true',help='if only do evaluation')
+parser.add_argument('--dev_test', default=False, type=str2bool,
+                    help='run one evaluation before training loop starts')
 parser.add_argument('--flops', action='store_true',
         help='flops calculation')
 parser.add_argument('--ckp',type=str,default=None,help='checkpoint path during evaluation')
@@ -560,7 +562,7 @@ def main():
     print(colored('Starting main loop', 'blue'))
 
     # Initial evaluation before training
-    if start_epoch == 0:
+    if start_epoch == 0 and args.dev_test:
         print(colored('Initial evaluation before training', 'blue'))
         print('Evaluate ...')
         # Temporarily disable forward hooks during evaluation

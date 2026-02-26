@@ -1,10 +1,13 @@
 """ImageNet pretrain entrypoint for MoE ViT (DeiT-inspired skeleton)."""
 
 import argparse
+import importlib
 import json
 import os
+import sys
 import time
 from copy import deepcopy
+from datetime import datetime, timezone
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -31,6 +34,7 @@ from pretrain.optim import build_optimizer, build_scheduler
 from pretrain.utils import init_distributed_mode, is_main_process, set_seed
 from pretrain.utils.checkpoint import auto_resume, save_checkpoint
 from utils.helpers import set_upcycling_runtime_options
+from utils.tracing import patch_and_log_initializations, restore_original_initializations
 
 
 def str2bool(v):
@@ -70,6 +74,9 @@ def normalize_config(cfg):
     _set_if_absent(out, "batch_size", _maybe_get(cfg, "trBatch"))
     _set_if_absent(out, "workers", _maybe_get(cfg, "nworkers"))
     _set_if_absent(out, "dataset_name", _maybe_get(cfg, "train_db_name"))
+    _set_if_absent(out, "eval_freq", _maybe_get(cfg, "eval_freq"))
+    _set_if_absent(out, "dev_test", _maybe_get(cfg, "dev_test"))
+    _set_if_absent(out, "log_initializations", _maybe_get(cfg, "log_initializations"))
     _set_if_absent(out, "deit_init_mode", _maybe_get(cfg, "deit_init_mode"))
     _set_if_absent(out, "deit_init_mode", _maybe_get(cfg, "init_mode"))
     _set_if_absent(out, "use_weight_scaling", _maybe_get(cfg, "use_weight_scaling"))
@@ -292,6 +299,8 @@ def get_args_parser():
     parser.add_argument("--output-dir", default="./output/pretrain", type=str)
     parser.add_argument("--resume", default="", type=str)
     parser.add_argument("--save-freq", default=10, type=int)
+    parser.add_argument("--eval-freq", default=10, type=int)
+    parser.add_argument("--dev-test", default=False, type=str2bool)
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--dataset-name", default="ImageNet1K", type=str)
 
@@ -394,6 +403,7 @@ def get_args_parser():
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--print-freq", default=10, type=int)
     parser.add_argument("--device", default="cuda", type=str)
+    parser.add_argument("--log-initializations", default=True, type=str2bool)
 
     # distributed
     parser.add_argument("--world-size", default=1, type=int)
@@ -467,8 +477,102 @@ def build_teacher_model(args, device):
     return teacher
 
 
+def _dump_run_metadata(args):
+    if not is_main_process():
+        return
+
+    args_dict = {k: v for k, v in vars(args).items()}
+    payload = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "command": " ".join(sys.argv),
+        "args": args_dict,
+    }
+    out_path = os.path.join(args.output_dir, "run_args.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    print(f"Saved run args to {out_path}")
+    print("Run arguments:")
+    print(json.dumps(args_dict, indent=2, sort_keys=True))
+
+
+def _resolve_output_dir(args):
+    base_output_dir = os.path.expandvars(os.path.expanduser(str(args.output_dir)))
+    if getattr(args, "resume", ""):
+        args.output_dir = base_output_dir
+        return
+
+    leaf = os.path.basename(os.path.normpath(base_output_dir))
+    already_timestamped = (
+        len(leaf) == 9
+        and leaf[4] == "_"
+        and leaf[:4].isdigit()
+        and leaf[5:].isdigit()
+    )
+    if already_timestamped:
+        args.output_dir = base_output_dir
+        return
+
+    timestamp = datetime.now().strftime("%m%d_%H%M")
+    if (
+        getattr(args, "distributed", False)
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    ):
+        shared = [timestamp if is_main_process() else None]
+        torch.distributed.broadcast_object_list(shared, src=0)
+        timestamp = str(shared[0])
+
+    args.output_dir = os.path.join(base_output_dir, timestamp)
+
+
+def _patch_model_initialization_logging(args):
+    if not bool(getattr(args, "log_initializations", True)):
+        return [], {}
+
+    module_names = [
+        # Required by pretrain MoE path.
+        "models.ckpt_vision_transformer_moe",
+        "models.ckpt_custom_moe_layer",
+        "models.gate_funs.ckpt_noisy_gate_vmoe",
+        "models.gate_funs.noisy_gate",
+        "pretrain.models.moe_vit_cls",
+        # Keep train_fastmoe parity where possible (optional by environment).
+        "models.gate_funs.token_noisy_gate_vmoe",
+        "models.token_custom_moe_layer",
+        "models.token_vision_transformer_moe",
+        "models.token_vit_up_head",
+        "models.vit_up_head",
+        "models.models",
+    ]
+
+    modules_to_patch = []
+    for module_name in module_names:
+        try:
+            modules_to_patch.append(importlib.import_module(module_name))
+        except Exception as e:
+            if is_main_process():
+                print(f"[InitLog] Skip module '{module_name}': {e}")
+
+    if not modules_to_patch:
+        if is_main_process():
+            print("[InitLog] No modules available for patching.")
+        return [], {}
+
+    try:
+        original_inits = patch_and_log_initializations(modules_to_patch, args)
+        if is_main_process():
+            print(f"[InitLog] Patched {len(modules_to_patch)} modules for initialization logging.")
+        return modules_to_patch, original_inits
+    except Exception as e:
+        if is_main_process():
+            print(f"[InitLog] Failed to patch initialization logging: {e}")
+        return [], {}
+
+
 def main():
     args = parse_args()
+    if int(args.eval_freq) < 1:
+        raise ValueError(f"--eval-freq must be >= 1, got {args.eval_freq}")
     init_distributed_mode(args)
     _resolve_data_path_from_env(args)
     _resolve_deit_init_mode(args)
@@ -503,7 +607,11 @@ def main():
     set_seed(args.seed, rank=args.rank)
     cudnn.benchmark = True
 
+    _resolve_output_dir(args)
     os.makedirs(args.output_dir, exist_ok=True)
+    if is_main_process():
+        print(f"Resolved output dir: {args.output_dir}")
+    _dump_run_metadata(args)
 
     dataset_train, dataset_val, nb_classes = build_imagenet_datasets(args)
     args.nb_classes = nb_classes
@@ -523,7 +631,12 @@ def main():
             num_classes=args.nb_classes,
         )
 
-    model = build_model(args)
+    modules_to_patch, original_inits = _patch_model_initialization_logging(args)
+    try:
+        model = build_model(args)
+    finally:
+        if modules_to_patch and original_inits:
+            restore_original_initializations(modules_to_patch, original_inits)
     model.to(device)
     model_ema = None
     if args.model_ema:
@@ -591,6 +704,11 @@ def main():
         print(f"Eval only: Acc@1={test_stats['acc1']:.3f} Acc@5={test_stats['acc5']:.3f}")
         return
 
+    if args.dev_test:
+        if is_main_process():
+            print("Run one pre-flight validation (--dev-test=true)")
+        _ = evaluate(loader_val, model, device, args)
+
     print("Start training")
     start_time = time.time()
 
@@ -614,12 +732,19 @@ def main():
         )
 
         scheduler.step(epoch + 1)
-        test_stats = evaluate(loader_val, model, device, args)
-        acc1 = float(test_stats.get("acc1", 0.0))
 
-        is_best = acc1 > best_acc1
-        if is_best:
-            best_acc1 = acc1
+        do_eval = ((epoch + 1) % int(args.eval_freq) == 0) or ((epoch + 1) == args.epochs)
+        if do_eval:
+            test_stats = evaluate(loader_val, model, device, args)
+            acc1 = float(test_stats.get("acc1", 0.0))
+            is_best = acc1 > best_acc1
+            if is_best:
+                best_acc1 = acc1
+        else:
+            test_stats = {}
+            is_best = False
+            if is_main_process():
+                print(f"Skip eval at epoch {epoch + 1} (eval_freq={args.eval_freq})")
 
         save_checkpoint(
             args=args,
@@ -638,9 +763,11 @@ def main():
                 "epoch": epoch,
                 "n_parameters": sum(p.numel() for p in model_without_ddp.parameters() if p.requires_grad),
                 "best_acc1": best_acc1,
+                "eval_performed": bool(do_eval),
             }
             log_stats.update({f"train_{k}": v for k, v in train_stats.items()})
-            log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
+            if do_eval:
+                log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 

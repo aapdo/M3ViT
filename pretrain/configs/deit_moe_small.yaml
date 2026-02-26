@@ -50,7 +50,7 @@ backbone_kwargs:
   random_init: true
   deit_init_mode: scratch
   distilled: false
-  moe_mlp_ratio: 2.0
+  moe_mlp_ratio: 1.0
   moe_experts: 16
   moe_top_k: 2
   gate_dim: -1

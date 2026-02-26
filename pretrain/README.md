@@ -32,6 +32,8 @@ Use `mtl_*_global.pth` for downstream `--pretrained` in MTL training.
 torchrun --nproc_per_node=8 pretrain/train.py \
   --config pretrain/configs/deit_moe_small.yaml \
   --data-path /path/to/imagenet \
+  --eval-freq 10 \
+  --dev-test true \
   --output-dir /path/to/output
 
 python pretrain/export_to_mtl.py \
@@ -130,6 +132,10 @@ python pretrain/export_to_mtl.py \
 
 - Distillation flags are scaffolded but disabled by default (`--distillation-type none`).
 - The default pipeline uses AdamW + warmup + cosine decay (DeiT-style pretrain setup).
+- Evaluation runs every `--eval-freq` epochs (default: `10`, and always at final epoch).
+- `--dev-test true` runs one validation pass before the training loop starts.
+- Model construction `__init__` arguments are logged via `patch_and_log_initializations` by default (`--log-initializations true`).
+- `--output-dir` is treated as a base path; each run writes into a timestamped subdirectory (`MMDD_HHMM`).
 - Single-file rank-local MoE checkpoints are intentionally rejected by the MTL loader.
   If a checkpoint was produced in multi-GPU mode and only one local file is available,
   it cannot be fully reconstructed; use the full shard directory export path.
