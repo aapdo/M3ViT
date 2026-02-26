@@ -30,6 +30,7 @@ from pretrain.models import build_criterion, build_model
 from pretrain.optim import build_optimizer, build_scheduler
 from pretrain.utils import init_distributed_mode, is_main_process, set_seed
 from pretrain.utils.checkpoint import auto_resume, save_checkpoint
+from utils.helpers import set_upcycling_runtime_options
 
 
 def str2bool(v):
@@ -69,6 +70,14 @@ def normalize_config(cfg):
     _set_if_absent(out, "batch_size", _maybe_get(cfg, "trBatch"))
     _set_if_absent(out, "workers", _maybe_get(cfg, "nworkers"))
     _set_if_absent(out, "dataset_name", _maybe_get(cfg, "train_db_name"))
+    _set_if_absent(out, "deit_init_mode", _maybe_get(cfg, "deit_init_mode"))
+    _set_if_absent(out, "deit_init_mode", _maybe_get(cfg, "init_mode"))
+    _set_if_absent(out, "use_weight_scaling", _maybe_get(cfg, "use_weight_scaling"))
+    _set_if_absent(
+        out,
+        "use_virtual_group_initialization",
+        _maybe_get(cfg, "use_virtual_group_initialization"),
+    )
 
     # Optimizer/scheduler sections.
     _set_if_absent(out, "opt", _maybe_get(cfg, "optimizer"))
@@ -102,6 +111,14 @@ def normalize_config(cfg):
     _set_if_absent(out, "attn_drop_rate", _maybe_get(bn_kwargs, "attn_drop_rate"))
     _set_if_absent(out, "drop_path", _maybe_get(bn_kwargs, "drop_path_rate"))
     _set_if_absent(out, "random_init", _maybe_get(bn_kwargs, "random_init"))
+    _set_if_absent(out, "deit_init_mode", _maybe_get(bn_kwargs, "deit_init_mode"))
+    _set_if_absent(out, "deit_init_mode", _maybe_get(bn_kwargs, "init_mode"))
+    _set_if_absent(out, "use_weight_scaling", _maybe_get(bn_kwargs, "use_weight_scaling"))
+    _set_if_absent(
+        out,
+        "use_virtual_group_initialization",
+        _maybe_get(bn_kwargs, "use_virtual_group_initialization"),
+    )
     _set_if_absent(out, "pos_embed_interp", _maybe_get(bn_kwargs, "pos_embed_interp"))
     _set_if_absent(out, "align_corners", _maybe_get(bn_kwargs, "align_corners"))
     _set_if_absent(out, "moe_mlp_ratio", _maybe_get(bn_kwargs, "moe_mlp_ratio"))
@@ -212,6 +229,51 @@ def _resolve_data_path_from_env(args):
         args.data_path = os.path.expandvars(os.path.expanduser(str(data_path)))
 
 
+def _resolve_deit_init_mode(args):
+    raw_mode = str(getattr(args, "deit_init_mode", "auto") or "auto").strip().lower()
+    valid_modes = {"auto", "scratch", "deit_warm_start", "deit_upcycling"}
+    if raw_mode not in valid_modes:
+        raise ValueError(f"Unsupported deit_init_mode '{raw_mode}'. Expected one of: {sorted(valid_modes)}")
+
+    if raw_mode == "auto":
+        resolved_mode = "scratch" if bool(getattr(args, "random_init", True)) else "deit_upcycling"
+    else:
+        resolved_mode = raw_mode
+
+    args.deit_init_mode = resolved_mode
+    args.random_init = resolved_mode == "scratch"
+    if resolved_mode != "deit_upcycling":
+        # These knobs only affect upcycling expert/gate initialization.
+        args.use_weight_scaling = False
+        args.use_virtual_group_initialization = False
+    return resolved_mode
+
+
+def _configure_upcycling_runtime_options(args):
+    world_size = int(getattr(args, "world_size", 1) or 1)
+    if world_size < 1:
+        world_size = 1
+    tot_experts = int(getattr(args, "moe_experts", 0) or 0)
+    local_experts = None
+    if tot_experts > 0 and tot_experts % world_size == 0:
+        local_experts = tot_experts // world_size
+
+    set_upcycling_runtime_options(
+        {
+            "deit_init_mode": str(getattr(args, "deit_init_mode", "deit_upcycling")),
+            "use_virtual_group_initialization": bool(
+                getattr(args, "use_virtual_group_initialization", False)
+            ),
+            "use_weight_scaling": bool(getattr(args, "use_weight_scaling", False)),
+            "moe_top_k": int(getattr(args, "moe_top_k", 0) or 0),
+            "moe_experts_local": int(local_experts) if local_experts is not None else None,
+            "moe_world_size": int(world_size),
+            "tot_experts": int(tot_experts) if tot_experts > 0 else None,
+            "moe_experts": int(tot_experts) if tot_experts > 0 else None,
+        }
+    )
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser("MoE ViT ImageNet pretrain", add_help=False)
 
@@ -255,6 +317,16 @@ def get_args_parser():
 
     # init behavior
     parser.add_argument("--random-init", default=True, type=str2bool)
+    parser.add_argument(
+        "--deit-init-mode",
+        "--init-mode",
+        dest="deit_init_mode",
+        default="auto",
+        type=str,
+        choices=["auto", "scratch", "deit_warm_start", "deit_upcycling"],
+    )
+    parser.add_argument("--use-weight-scaling", default=False, type=str2bool)
+    parser.add_argument("--use-virtual-group-initialization", default=False, type=str2bool)
     parser.add_argument("--pos-embed-interp", default=False, type=str2bool)
     parser.add_argument("--align-corners", default=False, type=str2bool)
 
@@ -391,6 +463,15 @@ def main():
     args = parse_args()
     init_distributed_mode(args)
     _resolve_data_path_from_env(args)
+    _resolve_deit_init_mode(args)
+    _configure_upcycling_runtime_options(args)
+
+    if is_main_process():
+        print(
+            "DeiT init mode:",
+            args.deit_init_mode,
+            f"(random_init={args.random_init}, upcycling={args.deit_init_mode == 'deit_upcycling'})",
+        )
 
     if args.data_path == "":
         raise ValueError(

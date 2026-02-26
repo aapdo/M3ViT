@@ -106,6 +106,13 @@ parser.add_argument('--moe_gate_arch', default="", type=str)
 parser.add_argument('--moe_gate_type', default="noisy", type=str)
 parser.add_argument('--vmoe_noisy_std', default=1, type=float)
 parser.add_argument('--backbone_random_init',default=False, type=str2bool, help='whether randomly initialize backbone')
+parser.add_argument(
+    '--deit_init_mode',
+    default='auto',
+    type=str,
+    choices=['auto', 'scratch', 'deit_warm_start', 'deit_upcycling'],
+    help='DeiT init mode: scratch | deit_warm_start | deit_upcycling (auto uses backbone_random_init).',
+)
 parser.add_argument('--pretrained', default='', type=str, help='path to moe pretrained checkpoint')
 parser.add_argument('--moe_noisy_gate_loss_weight', default=0.01, type=float)
 
@@ -171,6 +178,28 @@ parser.add_argument('--use_virtual_group_initialization', default=False, type=st
 
 args = parser.parse_args()
 
+
+def resolve_deit_init_mode(args):
+    raw_mode = str(getattr(args, "deit_init_mode", "auto") or "auto").strip().lower()
+    valid_modes = {"auto", "scratch", "deit_warm_start", "deit_upcycling"}
+    if raw_mode not in valid_modes:
+        raise ValueError(f"Unsupported deit_init_mode '{raw_mode}'. Expected one of: {sorted(valid_modes)}")
+
+    if raw_mode == "auto":
+        resolved_mode = "scratch" if bool(getattr(args, "backbone_random_init", False)) else "deit_upcycling"
+    else:
+        resolved_mode = raw_mode
+
+    args.deit_init_mode = resolved_mode
+    args.backbone_random_init = resolved_mode == "scratch"
+    if resolved_mode != "deit_upcycling":
+        args.use_weight_scaling = False
+        args.use_virtual_group_initialization = False
+    return resolved_mode
+
+
+resolve_deit_init_mode(args)
+
 if args.task_one_hot:
     args.one_by_one = True
 
@@ -185,6 +214,11 @@ def main():
     cv2.setNumThreads(0)
     if int(args.local_rank) < 0:
         args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    print(
+        f"DeiT init mode: {args.deit_init_mode} "
+        f"(backbone_random_init={args.backbone_random_init}, "
+        f"upcycling={args.deit_init_mode == 'deit_upcycling'})"
+    )
     config_path = args.config_path
     if config_path == 'configs/path_env.yml' and not os.path.exists(config_path) and os.path.exists('configs/env.yml'):
         config_path = 'configs/env.yml'

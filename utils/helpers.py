@@ -168,6 +168,17 @@ def _merge_cfg_with_runtime_options(cfg):
     return merged
 
 
+def _resolve_deit_init_mode_from_cfg(cfg):
+    mode = str(_cfg_get(cfg, "deit_init_mode", "deit_upcycling") or "deit_upcycling")
+    mode = mode.strip().lower()
+    valid_modes = {"scratch", "deit_warm_start", "deit_upcycling"}
+    if mode not in valid_modes:
+        raise ValueError(
+            f"Unsupported deit_init_mode '{mode}'. Expected one of {sorted(valid_modes)}"
+        )
+    return mode
+
+
 def load_state_dict_from_url(url, model_dir=None, file_name=None, check_hash=False, progress=True, map_location=None):
     # Issue warning to move data if old env is set
     if os.getenv('TORCH_MODEL_ZOO'):
@@ -254,6 +265,11 @@ def _align_pos_embed_prefix_tokens(pos_embed, target_prefix_tokens):
 def load_pretrained_pos_emb(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=None, strict=True, pos_embed_interp=False, num_patches=576, align_corners=False, img_h=None, img_w=None):
     if cfg is None:
         cfg = getattr(model, 'default_cfg')
+    cfg = _merge_cfg_with_runtime_options(cfg)
+    deit_init_mode = _resolve_deit_init_mode_from_cfg(cfg)
+    if deit_init_mode == "scratch":
+        print("[INIT] skip DeiT pos-embed load (deit_init_mode=scratch)")
+        return
     if cfg is None or 'url' not in cfg or not cfg['url']:
         _logger.warning(
             "Pretrained model URL is invalid, using random initialization.")
@@ -314,6 +330,10 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
     if cfg is None:
         cfg = getattr(model, 'default_cfg')
     cfg = _merge_cfg_with_runtime_options(cfg)
+    deit_init_mode = _resolve_deit_init_mode_from_cfg(cfg)
+    if deit_init_mode == "scratch":
+        print("[INIT] skip DeiT checkpoint load (deit_init_mode=scratch)")
+        return
     if cfg is None or 'url' not in cfg or not cfg['url']:
         _logger.warning(
             "Pretrained model URL is invalid, using random initialization.")
@@ -417,27 +437,18 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
             state_dict["pos_embed"], target_prefix_tokens
         )
 
-    check = False
-    if check:
-        for i in [1,3,5,7,9,11]:
-            state_dict['blocks.%s.mlp.experts.htoh4.weight'%(str(i))] = torch.unsqueeze(state_dict['blocks.%s.mlp.fc1.weight'%(str(i))], 0)
-            state_dict['blocks.%s.mlp.experts.htoh4.bias'%(str(i))] = torch.unsqueeze(state_dict['blocks.%s.mlp.fc1.bias'%(str(i))], 0)
-            state_dict['blocks.%s.mlp.experts.h4toh.weight'%(str(i))]=torch.unsqueeze(state_dict['blocks.%s.mlp.fc2.weight'%(str(i))], 0)
-            state_dict['blocks.%s.mlp.experts.h4toh.bias'%(str(i))]=torch.unsqueeze(state_dict['blocks.%s.mlp.fc2.bias'%(str(i))], 0)
+    if deit_init_mode == "deit_upcycling":
+        state_dict = _inject_moe_expert_from_deit_mlp(state_dict, model, cfg)
 
-            # state_dict['blocks.1.mlp.experts.htoh4.weight'] = state_dict['blocks.1.mlp.fc1.weight']
-            # state_dict['blocks.1.mlp.experts.htoh4.bias'] = state_dict['blocks.1.mlp.fc1.bias']
-            # state_dict['blocks.1.mlp.experts.h4toh.weight']=state_dict['blocks.1.mlp.fc2.weight']
-            # state_dict['blocks.1.mlp.experts.h4toh.bias']=state_dict['blocks.1.mlp.fc2.bias']
+        if cfg.get('use_virtual_group_initialization', False):
+            state_dict = _inject_virtual_group_init_for_gates(
+                state_dict, model,
+                cfg=cfg,
+                init="normal", std=0.02
+            )
+    else:
+        print(f"[INJECT] skip MoE upcycling (deit_init_mode={deit_init_mode})")
 
-    state_dict = _inject_moe_expert_from_deit_mlp(state_dict, model, cfg)
-
-    if cfg.get('use_virtual_group_initialization', False):
-        state_dict = _inject_virtual_group_init_for_gates(
-            state_dict, model,
-            cfg=cfg,
-            init="normal", std=0.02
-        )
     msg = model.load_state_dict(state_dict, strict=strict)
     print('============load model weights from============',cfg['url'], msg)
 
