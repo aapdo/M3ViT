@@ -49,6 +49,22 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --output-dir /path/to/output
 ```
 
+Hugging Face auto-download is also supported by setting a HF dataset URI:
+
+```bash
+torchrun --nproc_per_node=8 pretrain/train.py \
+  --config pretrain/configs/deit_moe_small.yaml \
+  --config-path configs/path_env.yml \
+  --data-path hf://ILSVRC/imagenet-1k \
+  --hf-cache-dir /path/to/hf_cache \
+  --output-dir /path/to/output
+```
+
+Notes:
+- Make sure you already have access to the gated dataset on Hugging Face.
+- Token is read from `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` environment variables.
+- If `configs/path_env.yml` has `huggingface_access_token`, it is auto-injected into those env vars.
+
 V-MoE-style recipe (adapted to this codebase):
 
 ```bash

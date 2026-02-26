@@ -70,6 +70,9 @@ def normalize_config(cfg):
     _set_if_absent(out, "batch_size", _maybe_get(cfg, "trBatch"))
     _set_if_absent(out, "workers", _maybe_get(cfg, "nworkers"))
     _set_if_absent(out, "dataset_name", _maybe_get(cfg, "train_db_name"))
+    _set_if_absent(out, "hf_train_split", _maybe_get(cfg, "hf_train_split"))
+    _set_if_absent(out, "hf_val_split", _maybe_get(cfg, "hf_val_split"))
+    _set_if_absent(out, "hf_cache_dir", _maybe_get(cfg, "hf_cache_dir"))
     _set_if_absent(out, "deit_init_mode", _maybe_get(cfg, "deit_init_mode"))
     _set_if_absent(out, "deit_init_mode", _maybe_get(cfg, "init_mode"))
     _set_if_absent(out, "use_weight_scaling", _maybe_get(cfg, "use_weight_scaling"))
@@ -208,15 +211,23 @@ def _resolve_env_config_path(config_path):
 
 
 def _resolve_data_path_from_env(args):
-    if getattr(args, "data_path", ""):
-        return
-
     env_cfg_path = _resolve_env_config_path(getattr(args, "config_path", ""))
     if not env_cfg_path or not os.path.exists(env_cfg_path):
         return
 
     with open(env_cfg_path, "r", encoding="utf-8") as f:
         env_cfg = yaml.safe_load(f) or {}
+
+    hf_token = str(env_cfg.get("huggingface_access_token", "") or "").strip()
+    if hf_token:
+        hf_token = os.path.expandvars(os.path.expanduser(hf_token)).strip()
+        # Keep placeholders like ${HF_TOKEN} untouched if unresolved.
+        if hf_token and "$" not in hf_token:
+            os.environ.setdefault("HF_TOKEN", hf_token)
+            os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", hf_token)
+
+    if getattr(args, "data_path", ""):
+        return
 
     dataset_roots = env_cfg.get("dataset_roots", {}) or {}
     dataset_name = (
@@ -286,6 +297,9 @@ def get_args_parser():
     parser.add_argument("--save-freq", default=10, type=int)
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--dataset-name", default="ImageNet1K", type=str)
+    parser.add_argument("--hf-train-split", default="train", type=str)
+    parser.add_argument("--hf-val-split", default="validation", type=str)
+    parser.add_argument("--hf-cache-dir", default="", type=str)
 
     # model
     parser.add_argument("--model", default="moe_vit_small", type=str)
