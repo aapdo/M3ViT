@@ -214,10 +214,12 @@ def main():
     cv2.setNumThreads(0)
     if int(args.local_rank) < 0:
         args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    expert_upcycling = args.deit_init_mode in {"deit_warm_start", "deit_upcycling"}
     print(
         f"DeiT init mode: {args.deit_init_mode} "
         f"(backbone_random_init={args.backbone_random_init}, "
-        f"upcycling={args.deit_init_mode == 'deit_upcycling'})"
+        f"expert_upcycling={expert_upcycling}, "
+        f"gate_random_init={args.deit_init_mode == 'deit_warm_start'})"
     )
     config_path = args.config_path
     if config_path == 'configs/path_env.yml' and not os.path.exists(config_path) and os.path.exists('configs/env.yml'):

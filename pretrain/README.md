@@ -55,7 +55,8 @@ The pretrain entrypoint supports three explicit initialization modes via
 `--deit-init-mode` (alias `--init-mode`):
 
 - `scratch`: random init pretraining (`random_init=True`)
-- `deit_warm_start`: load DeiT weights, keep MoE experts random
+- `deit_warm_start`: load DeiT weights and apply Nvidia-style expert upcycling
+  (dense MLP split to experts, requires expert hidden = dense hidden / 4)
 - `deit_upcycling`: load DeiT weights and initialize MoE experts from DeiT MLP
 - `auto`: compatibility mode (maps to `scratch` when `random_init=true`, else `deit_upcycling`)
 
@@ -72,6 +73,7 @@ torchrun --nproc_per_node=8 pretrain/train.py \
 torchrun --nproc_per_node=8 pretrain/train.py \
   --config pretrain/configs/deit_moe_small.yaml \
   --deit-init-mode deit_warm_start \
+  --moe-mlp-ratio 1.0 \
   --output-dir /path/to/output
 
 # 3) DeiT upcycling pretrain

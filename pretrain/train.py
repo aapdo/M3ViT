@@ -467,10 +467,12 @@ def main():
     _configure_upcycling_runtime_options(args)
 
     if is_main_process():
+        expert_upcycling = args.deit_init_mode in {"deit_warm_start", "deit_upcycling"}
         print(
             "DeiT init mode:",
             args.deit_init_mode,
-            f"(random_init={args.random_init}, upcycling={args.deit_init_mode == 'deit_upcycling'})",
+            f"(random_init={args.random_init}, expert_upcycling={expert_upcycling}, "
+            f"gate_random_init={args.deit_init_mode == 'deit_warm_start'})",
         )
 
     if args.data_path == "":

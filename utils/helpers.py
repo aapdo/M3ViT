@@ -334,6 +334,10 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
     if deit_init_mode == "scratch":
         print("[INIT] skip DeiT checkpoint load (deit_init_mode=scratch)")
         return
+    # MoE models loaded from dense DeiT checkpoints can have missing expert keys
+    # and extra dense-MLP keys, so strict loading is not appropriate.
+    if deit_init_mode in {"deit_warm_start", "deit_upcycling"} and strict:
+        strict = False
     if cfg is None or 'url' not in cfg or not cfg['url']:
         _logger.warning(
             "Pretrained model URL is invalid, using random initialization.")
@@ -437,15 +441,22 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
             state_dict["pos_embed"], target_prefix_tokens
         )
 
-    if deit_init_mode == "deit_upcycling":
-        state_dict = _inject_moe_expert_from_deit_mlp(state_dict, model, cfg)
+    if deit_init_mode in {"deit_warm_start", "deit_upcycling"}:
+        state_dict = _inject_moe_expert_from_deit_mlp(
+            state_dict,
+            model,
+            cfg,
+            deit_init_mode=deit_init_mode,
+        )
 
-        if cfg.get('use_virtual_group_initialization', False):
+        if deit_init_mode == "deit_upcycling" and cfg.get('use_virtual_group_initialization', False):
             state_dict = _inject_virtual_group_init_for_gates(
                 state_dict, model,
                 cfg=cfg,
                 init="normal", std=0.02
             )
+        elif deit_init_mode == "deit_warm_start":
+            print("[INIT] keep gate weights random for deit_warm_start")
     else:
         print(f"[INJECT] skip MoE upcycling (deit_init_mode={deit_init_mode})")
 
@@ -472,6 +483,7 @@ def _inject_moe_expert_from_deit_mlp(
     model,
     cfg,
     *,
+    deit_init_mode="deit_upcycling",
     verbose=True,
     verify_shape=True,
     sample_blocks=(1,),
@@ -496,10 +508,13 @@ def _inject_moe_expert_from_deit_mlp(
     use_weight_scaling = bool(_cfg_get(cfg, "use_weight_scaling", False))
     moe_router_pre_softmax = True  # 너는 softmax-then-topk 사용
 
+    force_nvidia_split = str(deit_init_mode).lower() == "deit_warm_start"
+
     if verbose:
         print(f"[INJECT] === _inject_moe_expert_from_deit_mlp START ===")
         print(
-            f"[INJECT] moe_mlp_ratio={moe_mlp_ratio}, default_topk={default_topk}, "
+            f"[INJECT] mode={deit_init_mode}, force_nvidia_split={force_nvidia_split}, "
+            f"moe_mlp_ratio={moe_mlp_ratio}, default_topk={default_topk}, "
             f"use_weight_scaling={use_weight_scaling}, moe_router_pre_softmax={moe_router_pre_softmax}"
         )
 
@@ -567,12 +582,14 @@ def _inject_moe_expert_from_deit_mlp(
         k_e2_w = f"blocks.{i}.mlp.experts.h4toh.weight"
         k_e2_b = f"blocks.{i}.mlp.experts.h4toh.bias"
 
-        if moe_mlp_ratio == 1.0 or moe_mlp_ratio == 1:
+        use_split_upcycling = force_nvidia_split or moe_mlp_ratio == 1.0 or moe_mlp_ratio == 1
+        if use_split_upcycling:
             # ---------------------------
             # moe_mlp_ratio=1 : 분할 upcycling (+ optional GELU scaling)
             # ---------------------------
             if verbose:
-                print(f"[INJECT] block {i}: moe_mlp_ratio=1 path (split upcycling)")
+                split_reason = "forced_by_deit_warm_start" if force_nvidia_split else "moe_mlp_ratio=1"
+                print(f"[INJECT] block {i}: split upcycling path ({split_reason})")
 
             hidden_dim = fc1_w.shape[0]
             expected_e1_w = model_sd.get(k_e1_w, None)
@@ -587,6 +604,12 @@ def _inject_moe_expert_from_deit_mlp(
             assert total_experts % granularity == 0, (
                 f"block {i}: total_experts={total_experts} must be divisible by granularity={granularity}"
             )
+            if force_nvidia_split and granularity != 4:
+                raise ValueError(
+                    "deit_warm_start requires Nvidia-style expert split "
+                    f"(dense_hidden / expert_hidden == 4), but got granularity={granularity}. "
+                    "Set moe_mlp_ratio=1.0 (expert hidden = dense MLP 1/4)."
+                )
             expansion_rate = total_experts // granularity  # E in sqrt(E*G^2/T)
             if verbose:
                 print(
