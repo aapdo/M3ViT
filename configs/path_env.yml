@@ -8,3 +8,7 @@ dataset_roots:
   cityscapes: ${HOME}/multi_task_datasets/cityscapes
 
 seism_root: /path/to/seism/
+
+# Optional: Hugging Face access token (e.g., for gated datasets like ILSVRC/imagenet-1k)
+# Prefer environment variable usage: export HF_TOKEN=...
+huggingface_access_token: ${HF_TOKEN}
