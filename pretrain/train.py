@@ -136,6 +136,8 @@ def normalize_config(cfg):
     _set_if_absent(out, "gate_dim", _maybe_get(bn_kwargs, "gate_dim"))
     _set_if_absent(out, "gate_task_specific_dim", _maybe_get(bn_kwargs, "gate_task_specific_dim"))
     _set_if_absent(out, "multi_gate", _maybe_get(bn_kwargs, "multi_gate"))
+    _set_if_absent(out, "moe_data_distributed", _maybe_get(cfg, "moe_data_distributed"))
+    _set_if_absent(out, "moe_data_distributed", _maybe_get(bn_kwargs, "moe_data_distributed"))
     _set_if_absent(out, "use_checkpointing", _maybe_get(bn_kwargs, "use_checkpointing"))
     _set_if_absent(out, "distilled", _maybe_get(bn_kwargs, "distilled"))
 
@@ -279,13 +281,20 @@ def _resolve_deit_init_mode(args):
 
 
 def _configure_upcycling_runtime_options(args):
-    world_size = int(getattr(args, "world_size", 1) or 1)
+    moe_data_distributed = bool(getattr(args, "moe_data_distributed", False))
+    world_size = 1 if moe_data_distributed else int(getattr(args, "world_size", 1) or 1)
     if world_size < 1:
         world_size = 1
     tot_experts = int(getattr(args, "moe_experts", 0) or 0)
     local_experts = None
     if tot_experts > 0 and tot_experts % world_size == 0:
         local_experts = tot_experts // world_size
+    elif tot_experts > 0 and world_size == 1:
+        local_experts = tot_experts
+
+    args.moe_world_size = int(world_size)
+    if local_experts is not None:
+        args.moe_experts_local = int(local_experts)
 
     set_upcycling_runtime_options(
         {
@@ -344,6 +353,7 @@ def get_args_parser():
     parser.add_argument("--gate-dim", default=-1, type=int)
     parser.add_argument("--gate-task-specific-dim", default=-1, type=int)
     parser.add_argument("--multi-gate", default=False, type=str2bool)
+    parser.add_argument("--moe-data-distributed", default=False, type=str2bool)
     parser.add_argument("--moe-cv-weight", default=0.01, type=float)
     parser.add_argument("--use-checkpointing", default=True, type=str2bool)
 
@@ -642,6 +652,10 @@ def main():
     init_distributed_mode(args)
     _resolve_data_path_from_env(args)
     _resolve_deit_init_mode(args)
+    if bool(getattr(args, "moe_data_distributed", False)) and bool(getattr(args, "fmoe_grouped_ddp", False)):
+        if is_main_process():
+            print("moe_data_distributed=True: forcing --no-fmoe-grouped-ddp for replicated experts.")
+        args.fmoe_grouped_ddp = False
     _configure_upcycling_runtime_options(args)
 
     if is_main_process():
@@ -716,7 +730,7 @@ def main():
         )
 
     if args.distributed:
-        if args.fmoe_grouped_ddp:
+        if args.fmoe_grouped_ddp and (not bool(getattr(args, "moe_data_distributed", False))):
             grouped_ddp_cls = _resolve_fmoe_grouped_ddp_cls()
             if grouped_ddp_cls is None:
                 raise ImportError(

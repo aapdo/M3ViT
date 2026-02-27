@@ -41,12 +41,23 @@ def build_model(args):
     num_heads = int(args.num_heads) if getattr(args, "num_heads", -1) > 0 else spec["num_heads"]
     mlp_ratio = float(args.mlp_ratio) if getattr(args, "mlp_ratio", -1.0) > 0 else spec["mlp_ratio"]
 
-    world_size = torch.distributed.get_world_size() if args.distributed else 1
-    if args.moe_experts % world_size != 0:
-        raise ValueError(
-            f"moe_experts ({args.moe_experts}) must be divisible by world size ({world_size})"
-        )
-    moe_experts_local = args.moe_experts // world_size
+    dist_world_size = torch.distributed.get_world_size() if args.distributed else 1
+    moe_data_distributed = bool(getattr(args, "moe_data_distributed", False))
+    if moe_data_distributed:
+        # Data-parallel MoE: each rank keeps the full expert set.
+        world_size = 1
+        moe_experts_local = int(args.moe_experts)
+    else:
+        world_size = int(dist_world_size)
+        if args.moe_experts % world_size != 0:
+            raise ValueError(
+                f"moe_experts ({args.moe_experts}) must be divisible by world size ({world_size})"
+            )
+        moe_experts_local = args.moe_experts // world_size
+
+    # Expose resolved MoE topology for logging/checkpoint helpers.
+    args.moe_world_size = int(world_size)
+    args.moe_experts_local = int(moe_experts_local)
 
     cfg = MoEViTConfig(
         model_name=model_name,

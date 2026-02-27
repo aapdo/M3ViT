@@ -104,22 +104,39 @@ def save_checkpoint(
     local_model_state = model_to_save.state_dict()
     rank = get_rank()
     world_size = get_world_size()
+    moe_world_size = int(
+        getattr(
+            args,
+            "moe_world_size",
+            1 if bool(getattr(args, "moe_data_distributed", False)) else world_size,
+        )
+        or 1
+    )
+    if moe_world_size < 1:
+        moe_world_size = 1
 
     # Build MTL-compatible global-expert checkpoint payload.
     mtl_state_local, _ = to_mtl_backbone_state_dict(local_model_state)
-    mtl_state_global = gather_global_expert_state_dict(mtl_state_local)
+    if moe_world_size > 1:
+        mtl_state_global = gather_global_expert_state_dict(mtl_state_local)
+    else:
+        # Replicated-expert mode: expert tensors are already full on every rank.
+        mtl_state_global = mtl_state_local
 
     moe_experts_global = getattr(args, "moe_experts", None)
     moe_experts_local = None
-    if moe_experts_global is not None and world_size > 0:
-        moe_experts_local = int(moe_experts_global) // int(world_size)
+    if moe_experts_global is not None:
+        if moe_world_size > 1:
+            moe_experts_local = int(moe_experts_global) // int(moe_world_size)
+        else:
+            moe_experts_local = int(moe_experts_global)
 
     mtl_payload = {
         "state_dict": mtl_state_global,
         "meta": build_mtl_meta(
             state_dict=mtl_state_global,
             source="pretrain",
-            world_size=world_size,
+            world_size=moe_world_size,
             moe_experts_global=moe_experts_global,
             moe_experts_local=moe_experts_local,
         ),
