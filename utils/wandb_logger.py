@@ -45,6 +45,9 @@ class WandbLogger:
         """
         self.enabled = enabled
         self.run = None
+        # Internal monotonically increasing step to prevent collisions between
+        # mixed logging call-sites (model internals, train loop, eval loop, etc.).
+        self._last_step = -1
 
     def init(self,
              project: str,
@@ -75,6 +78,7 @@ class WandbLogger:
             resume=resume,
             id=id
         )
+        self._last_step = -1
 
     def log_config(self, p: Dict, args):
         """
@@ -406,10 +410,20 @@ class WandbLogger:
         if not self.enabled or self.run is None:
             return
 
-        if step is not None:
-            self.run.log(metrics, step=step)
+        # Enforce global monotonic step regardless of who calls the logger.
+        # If a caller provides an out-of-order step, treat it as a hint and
+        # move forward from the latest known step.
+        if step is None:
+            resolved_step = self._last_step + 1
         else:
-            self.run.log(metrics)
+            try:
+                requested_step = int(step)
+            except Exception:
+                requested_step = self._last_step + 1
+            resolved_step = requested_step if requested_step > self._last_step else (self._last_step + 1)
+
+        self.run.log(metrics, step=resolved_step)
+        self._last_step = resolved_step
 
     def finish(self):
         """
