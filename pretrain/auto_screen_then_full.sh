@@ -20,6 +20,7 @@ CONFIG_PATH="${CONFIG_PATH:-configs/path_env.yml}"
 DATASET_NAME="${DATASET_NAME:-ImageNet1K}"
 
 SCREEN_EPOCHS="${SCREEN_EPOCHS:-10}"
+SCREEN_EVAL_FREQ="${SCREEN_EVAL_FREQ:-2}"
 FULL_EPOCHS="${FULL_EPOCHS:-300}"
 FULL_EVAL_FREQ="${FULL_EVAL_FREQ:-10}"
 FULL_SAVE_FREQ="${FULL_SAVE_FREQ:-10}"
@@ -54,7 +55,7 @@ fi
 echo "== Auto Screen+Full =="
 echo "RUN_TAG=${RUN_TAG}"
 echo "CANDIDATES=${CANDIDATES[*]}"
-echo "SCREEN_EPOCHS=${SCREEN_EPOCHS}, FULL_EPOCHS=${FULL_EPOCHS}, TOPK=${TOPK}"
+echo "SCREEN_EPOCHS=${SCREEN_EPOCHS}, SCREEN_EVAL_FREQ=${SCREEN_EVAL_FREQ}, FULL_EPOCHS=${FULL_EPOCHS}, FULL_EVAL_FREQ=${FULL_EVAL_FREQ}, TOPK=${TOPK}"
 echo "BASE_OUT=${BASE_OUT}"
 echo "BASE_LOG=${BASE_LOG}"
 echo
@@ -177,7 +178,7 @@ for exp_id in "${CANDIDATES[@]}"; do
   screen_log="${BASE_LOG}/${exp_id}_screen_${RUN_TAG}.log"
   mkdir -p "${screen_out_dir}"
 
-  run_train "${exp_id}" "screen" "${SCREEN_EPOCHS}" "${SCREEN_EPOCHS}" "${SCREEN_EPOCHS}" "${screen_out_dir}" "${screen_log}"
+  run_train "${exp_id}" "screen" "${SCREEN_EPOCHS}" "${SCREEN_EVAL_FREQ}" "${SCREEN_EPOCHS}" "${screen_out_dir}" "${screen_log}"
 
   screen_json="${screen_out_dir}/log.txt"
   if [[ ! -f "${screen_json}" ]]; then
