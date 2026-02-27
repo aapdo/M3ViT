@@ -136,6 +136,7 @@ def normalize_config(cfg):
     _set_if_absent(out, "gate_dim", _maybe_get(bn_kwargs, "gate_dim"))
     _set_if_absent(out, "gate_task_specific_dim", _maybe_get(bn_kwargs, "gate_task_specific_dim"))
     _set_if_absent(out, "multi_gate", _maybe_get(bn_kwargs, "multi_gate"))
+    _set_if_absent(out, "use_checkpointing", _maybe_get(bn_kwargs, "use_checkpointing"))
     _set_if_absent(out, "distilled", _maybe_get(bn_kwargs, "distilled"))
 
     # img_size can be int or [H, W]. For pretraining we use a square crop.
@@ -344,6 +345,7 @@ def get_args_parser():
     parser.add_argument("--gate-task-specific-dim", default=-1, type=int)
     parser.add_argument("--multi-gate", default=False, type=str2bool)
     parser.add_argument("--moe-cv-weight", default=0.01, type=float)
+    parser.add_argument("--use-checkpointing", default=True, type=str2bool)
 
     # init behavior
     parser.add_argument("--random-init", default=True, type=str2bool)
@@ -840,6 +842,28 @@ def main():
                 log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+            train_brief_keys = [
+                "loss",
+                "loss_no_cv",
+                "loss_base",
+                "loss_distill",
+                "cv_loss",
+                "cv_loss_weighted",
+                "lr",
+            ]
+            train_brief = " ".join(
+                f"{k}={float(train_stats[k]):.4f}" for k in train_brief_keys if k in train_stats
+            )
+            if do_eval:
+                print(
+                    f"[Epoch {epoch + 1}] {train_brief} "
+                    f"acc1={float(test_stats.get('acc1', 0.0)):.3f} "
+                    f"acc5={float(test_stats.get('acc5', 0.0)):.3f} "
+                    f"val_loss={float(test_stats.get('loss', 0.0)):.4f} "
+                    f"best_acc1={best_acc1:.3f}"
+                )
+            else:
+                print(f"[Epoch {epoch + 1}] {train_brief} best_acc1={best_acc1:.3f} (eval skipped)")
             if wandb_logger is not None:
                 wandb_metrics = {
                     "epoch": epoch + 1,

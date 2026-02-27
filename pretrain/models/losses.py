@@ -22,6 +22,8 @@ class DistillationLoss(nn.Module):
         self.distillation_type = distillation_type
         self.alpha = alpha
         self.tau = tau
+        # Latest scalar loss terms for logging.
+        self.last_stats = {}
 
     def forward(self, inputs, outputs, labels):
         if not isinstance(outputs, tuple):
@@ -29,8 +31,14 @@ class DistillationLoss(nn.Module):
 
         outputs, outputs_kd = outputs
         base_loss = self.base_criterion(outputs, labels)
+        base_loss_val = float(base_loss.detach().item())
 
         if self.distillation_type == "none":
+            self.last_stats = {
+                "loss_base": base_loss_val,
+                "loss_distill": 0.0,
+                "loss_no_cv": base_loss_val,
+            }
             return base_loss
 
         if outputs_kd is None:
@@ -57,7 +65,13 @@ class DistillationLoss(nn.Module):
         else:
             raise ValueError(f"Unknown distillation type: {self.distillation_type}")
 
-        return base_loss * (1 - self.alpha) + distillation_loss * self.alpha
+        total_loss = base_loss * (1 - self.alpha) + distillation_loss * self.alpha
+        self.last_stats = {
+            "loss_base": base_loss_val,
+            "loss_distill": float(distillation_loss.detach().item()),
+            "loss_no_cv": float(total_loss.detach().item()),
+        }
+        return total_loss
 
 
 def build_criterion(args, teacher_model=None):

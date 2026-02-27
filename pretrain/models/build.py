@@ -75,6 +75,7 @@ def build_model(args):
         gate_task_specific_dim=args.gate_task_specific_dim,
         multi_gate=args.multi_gate,
         world_size=world_size,
+        use_checkpointing=args.use_checkpointing,
     )
 
     return MoEViTForImageNet(cfg)

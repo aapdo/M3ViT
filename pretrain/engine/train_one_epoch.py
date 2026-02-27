@@ -36,9 +36,12 @@ def train_one_epoch(
             cv_loss = out.get("cv_loss", None) if isinstance(out, dict) else None
 
             loss = criterion(samples, logits, targets)
+            criterion_stats = getattr(criterion, "last_stats", None)
             cv = 0.0
+            cv_weighted = 0.0
             if cv_loss is not None:
                 cv = cv_loss.mean() if torch.is_tensor(cv_loss) else torch.tensor(float(cv_loss), device=device)
+                cv_weighted = float(args.moe_cv_weight) * float(cv.detach().item())
                 loss = loss + args.moe_cv_weight * cv
 
         loss_value = loss.item()
@@ -59,7 +62,10 @@ def train_one_epoch(
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        if isinstance(criterion_stats, dict):
+            metric_logger.update(**criterion_stats)
         if cv_loss is not None:
             metric_logger.update(cv_loss=float(cv.detach().item()))
+            metric_logger.update(cv_loss_weighted=cv_weighted)
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
