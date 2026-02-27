@@ -18,12 +18,15 @@ def train_one_epoch(
     mixup_fn,
     args,
     model_ema=None,
+    wandb_logger=None,
 ):
     model.train(True)
     metric_logger = MetricLogger(delimiter="  ")
     header = f"Epoch: [{epoch}]"
+    num_steps = len(data_loader) if hasattr(data_loader, "__len__") else None
+    step_base = epoch * num_steps if isinstance(num_steps, int) and num_steps > 0 else None
 
-    for samples, targets in metric_logger.log_every(data_loader, args.print_freq, header):
+    for step_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -67,5 +70,27 @@ def train_one_epoch(
         if cv_loss is not None:
             metric_logger.update(cv_loss=float(cv.detach().item()))
             metric_logger.update(cv_loss_weighted=cv_weighted)
+
+        if wandb_logger is not None:
+            step_metrics = {
+                "train_step/loss": float(loss_value),
+                "train_step/lr": float(optimizer.param_groups[0]["lr"]),
+            }
+            if isinstance(num_steps, int) and num_steps > 0:
+                step_metrics["train_step/epoch"] = float(epoch + (step_idx + 1) / num_steps)
+            if isinstance(criterion_stats, dict):
+                for k, v in criterion_stats.items():
+                    try:
+                        step_metrics[f"train_step/{k}"] = float(v)
+                    except Exception:
+                        continue
+            if cv_loss is not None:
+                step_metrics["train_step/cv_loss"] = float(cv.detach().item())
+                step_metrics["train_step/cv_loss_weighted"] = float(cv_weighted)
+
+            if step_base is None:
+                wandb_logger.log(step_metrics)
+            else:
+                wandb_logger.log(step_metrics, step=step_base + step_idx)
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

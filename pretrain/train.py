@@ -801,6 +801,7 @@ def main():
             mixup_fn=mixup_fn,
             args=args,
             model_ema=model_ema,
+            wandb_logger=wandb_logger,
         )
 
         scheduler.step(epoch + 1)
@@ -874,7 +875,11 @@ def main():
                 wandb_metrics.update({f"train/{k}": v for k, v in train_stats.items()})
                 if do_eval:
                     wandb_metrics.update({f"eval/{k}": v for k, v in test_stats.items()})
-                wandb_logger.log(wandb_metrics)
+                if hasattr(loader_train, "__len__") and len(loader_train) > 0:
+                    epoch_step = (epoch + 1) * len(loader_train) - 1
+                    wandb_logger.log(wandb_metrics, step=epoch_step)
+                else:
+                    wandb_logger.log(wandb_metrics)
 
     total_time = time.time() - start_time
     total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
