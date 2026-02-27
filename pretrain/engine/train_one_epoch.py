@@ -24,7 +24,6 @@ def train_one_epoch(
     metric_logger = MetricLogger(delimiter="  ")
     header = f"Epoch: [{epoch}]"
     num_steps = len(data_loader) if hasattr(data_loader, "__len__") else None
-    step_base = epoch * num_steps if isinstance(num_steps, int) and num_steps > 0 else None
 
     for step_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         samples = samples.to(device, non_blocking=True)
@@ -88,9 +87,6 @@ def train_one_epoch(
                 step_metrics["train_step/cv_loss"] = float(cv.detach().item())
                 step_metrics["train_step/cv_loss_weighted"] = float(cv_weighted)
 
-            if step_base is None:
-                wandb_logger.log(step_metrics)
-            else:
-                wandb_logger.log(step_metrics, step=step_base + step_idx)
+            wandb_logger.log(step_metrics)
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

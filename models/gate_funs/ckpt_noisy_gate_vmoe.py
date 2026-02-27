@@ -3,6 +3,7 @@ Noisy gate for gshard and switch
 """
 from fmoe.gates.base_gate import BaseGate
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -205,47 +206,42 @@ class NoisyGate_VMoE(BaseGate):
         zeros = torch.zeros_like(logits, requires_grad=True)
         gates = zeros.scatter(1, top_k_indices, top_k_logits)
 
-        # -----------------------------
-        # (ADD) wandb analysis logging (gate-only)
-        # -----------------------------
-        assert self.tot_expert % self.group_size == 0
-        try:
-            from utils.wandb_logger import get_wandb_logger
-            logger = get_wandb_logger()
-        except Exception:
-            logger = None
-
-        # rank0만 로깅(DDP 중복 방지)
-        do_log = (logger is not None)
-        if do_log:
+        # Optional high-frequency gate-level logging (disabled by default).
+        # Enable only when explicitly needed:
+        #   M3VIT_LOG_GATE_INTERNALS=1
+        if str(os.environ.get("M3VIT_LOG_GATE_INTERNALS", "0")).lower() in {"1", "true", "yes", "on"}:
+            assert self.tot_expert % self.group_size == 0
             try:
-                import torch.distributed as dist
-                if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
-                    do_log = False
+                from utils.wandb_logger import get_wandb_logger
+                logger = get_wandb_logger()
             except Exception:
-                pass
+                logger = None
 
-        if do_log:
-            with torch.no_grad():
-                # Entropy: -sum p log p
-                p = logits.clamp_min(1e-9)              # [T, E]
-                ent = -(p * p.log()).sum(dim=1)         # [T]
-                pmax = p.max(dim=1).values              # [T]
+            do_log = (logger is not None)
+            if do_log:
+                try:
+                    import torch.distributed as dist
+                    if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+                        do_log = False
+                except Exception:
+                    pass
 
-                # top-k가 속한 그룹 개수: group_id = expert_id // group_size
-                group_ids = top_k_indices // int(self.group_size)    # [T, K]
-                sorted_g, _ = torch.sort(group_ids, dim=1)
-                group_cnt = (sorted_g[:, 1:] != sorted_g[:, :-1]).sum(dim=1) + 1  # [T]
+            if do_log:
+                with torch.no_grad():
+                    p = logits.clamp_min(1e-9)              # [T, E]
+                    ent = -(p * p.log()).sum(dim=1)         # [T]
+                    pmax = p.max(dim=1).values              # [T]
+                    group_ids = top_k_indices // int(self.group_size)    # [T, K]
+                    sorted_g, _ = torch.sort(group_ids, dim=1)
+                    group_cnt = (sorted_g[:, 1:] != sorted_g[:, :-1]).sum(dim=1) + 1  # [T]
 
-                metrics = {
-                    "analysis/gate_entropy_mean": float(ent.mean().item()),
-                    "analysis/gate_pmax_mean": float(pmax.mean().item()),
-                    "analysis/topk_group_count_mean": float(group_cnt.float().mean().item()),
-                }
+                    metrics = {
+                        "analysis/gate_entropy_mean": float(ent.mean().item()),
+                        "analysis/gate_pmax_mean": float(pmax.mean().item()),
+                        "analysis/topk_group_count_mean": float(group_cnt.float().mean().item()),
+                    }
 
-            logger.log(metrics)
-
-        # -----------------------------
+                logger.log(metrics)
 
         # self.activation = logits.reshape(other_dim + [-1,]).contiguous()
 
