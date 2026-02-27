@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from torch.hub import load_state_dict_from_url
 
 from timm.layers import trunc_normal_
 
@@ -38,6 +39,7 @@ class MoEViTConfig:
     gate_task_specific_dim: int
     multi_gate: bool
     world_size: int
+    use_checkpointing: bool
 
 
 class MoEViTForImageNet(nn.Module):
@@ -87,6 +89,7 @@ class MoEViTForImageNet(nn.Module):
             sem_force=False,
             regu_subimage=False,
             expert_prune=False,
+            use_checkpointing=cfg.use_checkpointing,
         )
 
         self.norm = nn.LayerNorm(cfg.embed_dim)
@@ -97,6 +100,78 @@ class MoEViTForImageNet(nn.Module):
         if self.head_dist is not None:
             trunc_normal_(self.head_dist.weight, std=0.02)
             nn.init.zeros_(self.head_dist.bias)
+
+        # Warm-start cls/dist heads and pre-head norm from the same DeiT checkpoint
+        # used for encoder initialization when random_init is disabled.
+        if not cfg.random_init:
+            self._warm_start_cls_and_dist_heads()
+
+    @staticmethod
+    def _unwrap_state_dict(checkpoint):
+        if isinstance(checkpoint, dict):
+            model_sd = checkpoint.get("model")
+            if isinstance(model_sd, dict):
+                return model_sd
+            nested_sd = checkpoint.get("state_dict")
+            if isinstance(nested_sd, dict):
+                return nested_sd
+        return checkpoint
+
+    @staticmethod
+    def _copy_param_if_match(module, attr_name, state_dict, key):
+        if module is None:
+            return False, f"{key}: module is None"
+        if key not in state_dict:
+            return False, f"{key}: missing in checkpoint"
+        target = getattr(module, attr_name)
+        source = state_dict[key]
+        if tuple(target.shape) != tuple(source.shape):
+            return False, (
+                f"{key}: shape mismatch checkpoint {tuple(source.shape)} "
+                f"!= target {tuple(target.shape)}"
+            )
+        with torch.no_grad():
+            target.copy_(source.to(dtype=target.dtype, device=target.device))
+        return True, f"{key}: loaded"
+
+    def _warm_start_cls_and_dist_heads(self):
+        default_cfg = getattr(self.encoder, "default_cfg", None) or {}
+        url = str(default_cfg.get("url", "") or "")
+        if not url:
+            print("[INIT] skip head warm-start (no pretrained URL in encoder.default_cfg)")
+            return
+
+        try:
+            checkpoint = load_state_dict_from_url(url, map_location="cpu", progress=False)
+            state_dict = self._unwrap_state_dict(checkpoint)
+        except Exception as exc:
+            print(f"[INIT] failed to load head warm-start checkpoint from {url}: {exc}")
+            return
+
+        loaded_msgs = []
+        skipped_msgs = []
+
+        for module, attr_name, key in (
+            (self.norm, "weight", "norm.weight"),
+            (self.norm, "bias", "norm.bias"),
+            (self.head, "weight", "head.weight"),
+            (self.head, "bias", "head.bias"),
+        ):
+            ok, msg = self._copy_param_if_match(module, attr_name, state_dict, key)
+            (loaded_msgs if ok else skipped_msgs).append(msg)
+
+        if self.head_dist is not None:
+            for module, attr_name, key in (
+                (self.head_dist, "weight", "head_dist.weight"),
+                (self.head_dist, "bias", "head_dist.bias"),
+            ):
+                ok, msg = self._copy_param_if_match(module, attr_name, state_dict, key)
+                (loaded_msgs if ok else skipped_msgs).append(msg)
+
+        if loaded_msgs:
+            print("[INIT] warm-started classifier params:", ", ".join(loaded_msgs))
+        if skipped_msgs:
+            print("[INIT] skipped classifier params:", ", ".join(skipped_msgs))
 
     def no_weight_decay(self):
         skip = set()

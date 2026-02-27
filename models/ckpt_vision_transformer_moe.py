@@ -102,12 +102,21 @@ default_cfgs = {
     'vit_tiny_patch16_224': _cfg(
         url = 'https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth',
     ),
+    'deit_tiny_distilled_patch16_224': _cfg(
+        url='https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth',
+    ),
     'vit_small_patch16_224': _cfg(
         url = 'https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth',
         # url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_small_p16_224-15ec54c9.pth',
     ),
+    'deit_small_distilled_patch16_224': _cfg(
+        url='https://dl.fbaipublicfiles.com/deit/deit_small_distilled_patch16_224-649709d9.pth',
+    ),
     'vit_base_patch16_224': _cfg(
         url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_base_p16_224-4e355ebd.pth',
+    ),
+    'deit_base_distilled_patch16_224': _cfg(
+        url='https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_224-df68dfff.pth',
     ),
     'vit_base_patch16_384': _cfg(
         url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_384-83fb41ba.pth',
@@ -135,6 +144,18 @@ default_cfgs = {
         input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0, checkpoint=True,
     ),
 }
+
+_DISTILLED_DEFAULT_CFG_MAP = {
+    "vit_tiny_patch16_224": "deit_tiny_distilled_patch16_224",
+    "vit_small_patch16_224": "deit_small_distilled_patch16_224",
+    "vit_base_patch16_224": "deit_base_distilled_patch16_224",
+}
+
+
+def _resolve_default_cfg_name(model_name, distilled):
+    if distilled:
+        return _DISTILLED_DEFAULT_CFG_MAP.get(model_name, model_name)
+    return model_name
 
 
 def to_2tuple(x):
@@ -363,9 +384,11 @@ class Block(nn.Module):
                  moe_top_k=2, moe_gate_dim=-1, world_size=1, gate_return_decoupled_activation=False,
                  moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False, 
                  regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1,
-                 gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False):
+                 gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False,
+                 use_checkpointing=True):
         super().__init__()
         self.moe = moe
+        self.use_checkpointing = use_checkpointing
         self.last_moe_analysis = None
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
@@ -418,7 +441,8 @@ class Block(nn.Module):
         x = x + self.drop_path(self.attn(self.norm1(x)))
         normed_x = self.norm2(x)
 
-        task_id = int(task_id_tensor.item())
+        task_id_raw = int(task_id_tensor.item())
+        task_id = None if task_id_raw < 0 else task_id_raw
 
         moe_output, clean_logits, noisy_logits, noise_stddev, top_logits, gates = \
             self.mlp(normed_x, gate_inp, task_id, task_specific_feature, sem)
@@ -468,7 +492,7 @@ class Block(nn.Module):
 
         if not self.moe:
             # non-moe path: fully checkpointed
-            if self.training:
+            if self.training and self.use_checkpointing:
                 x = checkpoint(self._ckpt_non_moe, x, use_reentrant=False)
             else:
                 x = self._ckpt_non_moe(x)
@@ -476,9 +500,13 @@ class Block(nn.Module):
             return x, None
 
         # MoE path
-        task_id_tensor = torch.tensor(task_id, device=x.device) if task_id is not None else torch.tensor(0, device=x.device)
+        task_id_tensor = (
+            torch.tensor(task_id, device=x.device)
+            if task_id is not None
+            else torch.tensor(-1, device=x.device)
+        )
 
-        if self.training:
+        if self.training and self.use_checkpointing:
             (
                 x,
                 importance,
@@ -541,7 +569,7 @@ class VisionTransformerMoE(nn.Module):
                     act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=64, moe_top_k=2, world_size=1, gate_dim=-1,
                     gate_return_decoupled_activation=False, moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1,multi_gate=False,
                     regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False, regu_sem=False, sem_force=False, regu_subimage=False, 
-                    expert_prune=False, **kwargs):
+                    expert_prune=False, use_checkpointing=True, **kwargs):
         super(VisionTransformerMoE, self).__init__(**kwargs)
         # print(hybrid_backbone is None)
         self.model_name = model_name
@@ -582,9 +610,11 @@ class VisionTransformerMoE(nn.Module):
         self.multi_gate = multi_gate
         self.regu_sem = regu_sem
         self.sem_force = sem_force
+        self.use_checkpointing = bool(use_checkpointing)
         # print(self.hybrid_backbone is None)
         self.expert_prune = expert_prune
         print('set expert prune as ',self.expert_prune)
+        print("gradient checkpointing:", self.use_checkpointing)
         if self.hybrid_backbone is not None:
             self.patch_embed = HybridEmbed(
                 self.hybrid_backbone, img_size=self.img_size, in_chans=self.in_chans, embed_dim=self.embed_dim)
@@ -613,7 +643,8 @@ class VisionTransformerMoE(nn.Module):
         for i in range(self.depth):
             if i % 2 == 0:
                 blocks.append(Block(dim=self.embed_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, qkv_bias=self.qkv_bias, qk_scale=self.qk_scale,
-                drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer))
+                drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer,
+                use_checkpointing=self.use_checkpointing))
             else:
                 blocks.append(Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
@@ -622,7 +653,8 @@ class VisionTransformerMoE(nn.Module):
                               moe_gate_type=moe_gate_type, vmoe_noisy_std=vmoe_noisy_std, 
                               gate_task_specific_dim=self.gate_task_specific_dim,multi_gate=self.multi_gate,
                               regu_experts_fromtask = regu_experts_fromtask, num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
-                              gate_input_ahead = self.gate_input_ahead,regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,expert_prune=self.expert_prune))
+                              gate_input_ahead = self.gate_input_ahead,regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,
+                              expert_prune=self.expert_prune, use_checkpointing=self.use_checkpointing))
         self.blocks = nn.Sequential(*blocks)
         # NOTE as per official impl, we could have a pre-logits representation dense layer + tanh here
         # self.repr = nn.Linear(embed_dim, representation_size)
@@ -672,7 +704,14 @@ class VisionTransformerMoE(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
         if not self.random_init:
-            self.default_cfg = default_cfgs[self.model_name]
+            cfg_name = _resolve_default_cfg_name(
+                self.model_name, self.dist_token is not None
+            )
+            self.default_cfg = default_cfgs.get(cfg_name, default_cfgs[self.model_name])
+            print(
+                f"[INIT] using pretrained cfg '{cfg_name}' for model '{self.model_name}' "
+                f"(distilled={self.dist_token is not None})"
+            )
             load_pretrained_pos_emb(
                 self,
                 num_classes=self.num_classes,

@@ -58,6 +58,7 @@ backbone_kwargs:
   multi_gate: false
   moe_gate_type: noisy_vmoe
   vmoe_noisy_std: 1.0
+  use_checkpointing: false
 
 # Augmentation (DeiT default)
 aug_kwargs:
@@ -83,6 +84,9 @@ distillation_kwargs:
   teacher_path: "https://dl.fbaipublicfiles.com/deit/regnety_160-a5fe301d.pth"
   distillation_alpha: 0.5
   distillation_tau: 1.0
+
+# Router auxiliary loss weight (match V-MoE setting)
+moe_cv_weight: 0.005
 
 # Runtime
 seed: 0
