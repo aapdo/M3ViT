@@ -38,6 +38,7 @@ GROUP_NAME="${GROUP_NAME:-deit_small_auto}"
 BASE_OUT="${BASE_OUT:-output_dir/pretrain/${GROUP_NAME}}"
 BASE_LOG="${BASE_LOG:-logs/pretrain/${GROUP_NAME}}"
 SCORE_CSV="${BASE_LOG}/screen_scores_${RUN_TAG}.csv"
+RESUME_CMD_TXT="${BASE_LOG}/resume_cmd_${RUN_TAG}.txt"
 
 mkdir -p "${BASE_OUT}" "${BASE_LOG}"
 
@@ -58,7 +59,42 @@ echo "CANDIDATES=${CANDIDATES[*]}"
 echo "SCREEN_EPOCHS=${SCREEN_EPOCHS}, SCREEN_EVAL_FREQ=${SCREEN_EVAL_FREQ}, FULL_EPOCHS=${FULL_EPOCHS}, FULL_EVAL_FREQ=${FULL_EVAL_FREQ}, TOPK=${TOPK}"
 echo "BASE_OUT=${BASE_OUT}"
 echo "BASE_LOG=${BASE_LOG}"
+echo "RESUME_CMD_TXT=${RESUME_CMD_TXT}"
 echo
+
+cat > "${RESUME_CMD_TXT}" <<EOF
+# Resume command for auto_screen_then_full.sh
+# Generated at: $(date '+%Y-%m-%d %H:%M:%S')
+#
+# Re-run with the SAME RUN_TAG so the script can resume from existing checkpoints.
+# (full stage: prefers full_out_dir checkpoint, falls back to screen_out_dir checkpoint)
+
+cd $(pwd)
+
+CUDA_VISIBLE_DEVICES=${CUDA_DEVICES} \\
+NPROC_PER_NODE=${NPROC_PER_NODE} \\
+CONFIG=${CONFIG} \\
+CONFIG_PATH=${CONFIG_PATH} \\
+DATASET_NAME=${DATASET_NAME} \\
+SCREEN_EPOCHS=${SCREEN_EPOCHS} \\
+SCREEN_EVAL_FREQ=${SCREEN_EVAL_FREQ} \\
+FULL_EPOCHS=${FULL_EPOCHS} \\
+FULL_EVAL_FREQ=${FULL_EVAL_FREQ} \\
+FULL_SAVE_FREQ=${FULL_SAVE_FREQ} \\
+TOPK=${TOPK} \\
+SOFT_ALPHA=${SOFT_ALPHA} \\
+SOFT_TAU=${SOFT_TAU} \\
+USE_WANDB=${USE_WANDB} \\
+WANDB_PROJECT=${WANDB_PROJECT} \\
+RUN_NO_DISTILL=${RUN_NO_DISTILL} \\
+RUN_TAG=${RUN_TAG} \\
+GROUP_NAME=${GROUP_NAME} \\
+BASE_OUT=${BASE_OUT} \\
+BASE_LOG=${BASE_LOG} \\
+nohup bash pretrain/auto_screen_then_full.sh > auto_screen_${RUN_TAG}.log 2>&1 &
+EOF
+
+echo "Wrote resume command: ${RESUME_CMD_TXT}"
 
 append_mode_args() {
   local exp_id="$1"
