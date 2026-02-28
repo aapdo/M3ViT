@@ -48,6 +48,15 @@ def str2bool(v):
     raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def str2bool_or_auto(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in {"auto", "none", ""}:
+        return None
+    return str2bool(v)
+
+
 def _maybe_get(d, key):
     if isinstance(d, dict) and key in d:
         return d[key]
@@ -177,6 +186,7 @@ def normalize_config(cfg):
     # Runtime aliases.
     _set_if_absent(out, "pin_mem", _maybe_get(cfg, "pin_memory"))
     _set_if_absent(out, "fmoe_grouped_ddp", _maybe_get(cfg, "fmoe_grouped_ddp"))
+    _set_if_absent(out, "find_unused_parameters", _maybe_get(cfg, "find_unused_parameters"))
     _set_if_absent(out, "model_ema", _maybe_get(cfg, "model_ema"))
     _set_if_absent(out, "model_ema_decay", _maybe_get(cfg, "model_ema_decay"))
     _set_if_absent(out, "model_ema_force_cpu", _maybe_get(cfg, "model_ema_force_cpu"))
@@ -220,6 +230,21 @@ def _resolve_fmoe_grouped_ddp_cls():
         return cls
     except Exception:
         return None
+
+
+def _resolve_ddp_find_unused_parameters(args):
+    explicit = getattr(args, "find_unused_parameters", None)
+    if explicit is not None:
+        return bool(explicit)
+
+    # Auto mode:
+    # - distilled=True + distillation_type=none can leave distillation head unused.
+    # - otherwise default to False for better performance.
+    distill_type = str(getattr(args, "distillation_type", "none") or "none").strip().lower()
+    distilled = bool(getattr(args, "distilled", False))
+    if distilled and distill_type == "none":
+        return True
+    return False
 
 
 def _resolve_env_config_path(config_path):
@@ -421,6 +446,12 @@ def get_args_parser():
     parser.add_argument("--amp", default=True, type=str2bool)
     parser.add_argument("--fmoe-grouped-ddp", action="store_true", dest="fmoe_grouped_ddp")
     parser.add_argument("--no-fmoe-grouped-ddp", action="store_false", dest="fmoe_grouped_ddp")
+    parser.add_argument(
+        "--find-unused-parameters",
+        default=None,
+        type=str2bool_or_auto,
+        help="DDP find_unused_parameters (true/false/auto). auto enables only for distilled=true + distillation_type=none.",
+    )
     parser.add_argument("--model-ema", action="store_true", dest="model_ema")
     parser.add_argument("--no-model-ema", action="store_false", dest="model_ema")
     parser.add_argument("--model-ema-decay", default=0.99996, type=float)
@@ -730,6 +761,14 @@ def main():
         )
 
     if args.distributed:
+        ddp_find_unused = _resolve_ddp_find_unused_parameters(args)
+        if is_main_process():
+            print(
+                "DDP find_unused_parameters:",
+                ddp_find_unused,
+                f"(distilled={bool(getattr(args, 'distilled', False))}, "
+                f"distillation_type={getattr(args, 'distillation_type', 'none')})",
+            )
         if args.fmoe_grouped_ddp and (not bool(getattr(args, "moe_data_distributed", False))):
             grouped_ddp_cls = _resolve_fmoe_grouped_ddp_cls()
             if grouped_ddp_cls is None:
@@ -741,7 +780,7 @@ def main():
             model = grouped_ddp_cls(
                 model,
                 device_ids=[args.gpu],
-                find_unused_parameters=True,
+                find_unused_parameters=ddp_find_unused,
             )
             _sync_grouped_ddp_weights(
                 model,
@@ -752,7 +791,7 @@ def main():
             model = torch.nn.parallel.DistributedDataParallel(
                 model,
                 device_ids=[args.gpu],
-                find_unused_parameters=True,
+                find_unused_parameters=ddp_find_unused,
             )
         model_without_ddp = model.module if hasattr(model, "module") else model
     else:
