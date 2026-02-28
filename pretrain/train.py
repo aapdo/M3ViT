@@ -201,6 +201,10 @@ def normalize_config(cfg):
     _set_if_absent(out, "wandb_entity", _maybe_get(wandb_kwargs, "entity"))
     _set_if_absent(out, "wandb_name", _maybe_get(cfg, "wandb_name"))
     _set_if_absent(out, "wandb_name", _maybe_get(wandb_kwargs, "name"))
+    _set_if_absent(out, "wandb_id", _maybe_get(cfg, "wandb_id"))
+    _set_if_absent(out, "wandb_id", _maybe_get(wandb_kwargs, "id"))
+    _set_if_absent(out, "wandb_resume", _maybe_get(cfg, "wandb_resume"))
+    _set_if_absent(out, "wandb_resume", _maybe_get(wandb_kwargs, "resume"))
     _set_if_absent(out, "wandb_mode", _maybe_get(cfg, "wandb_mode"))
     _set_if_absent(out, "wandb_mode", _maybe_get(wandb_kwargs, "mode"))
     return out
@@ -253,6 +257,37 @@ def _resolve_env_config_path(config_path):
     if config_path == "configs/path_env.yml" and not os.path.exists(config_path) and os.path.exists("configs/env.yml"):
         return "configs/env.yml"
     return config_path
+
+
+def _wandb_run_meta_path(output_dir):
+    return os.path.join(output_dir, "wandb_run_meta.json")
+
+
+def _load_wandb_run_meta(output_dir):
+    meta_path = _wandb_run_meta_path(output_dir)
+    if not os.path.isfile(meta_path):
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_wandb_run_meta(output_dir, run):
+    if run is None:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    meta = {
+        "id": getattr(run, "id", ""),
+        "name": getattr(run, "name", ""),
+        "project": getattr(run, "project", ""),
+        "entity": getattr(run, "entity", ""),
+        "url": getattr(run, "url", ""),
+    }
+    with open(_wandb_run_meta_path(output_dir), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, sort_keys=True)
 
 
 def _resolve_data_path_from_env(args):
@@ -465,6 +500,13 @@ def get_args_parser():
     parser.add_argument("--wandb-project", default="m3vit-pretrain", type=str)
     parser.add_argument("--wandb-entity", default=None, type=str)
     parser.add_argument("--wandb-name", default="", type=str)
+    parser.add_argument("--wandb-id", default="", type=str)
+    parser.add_argument(
+        "--wandb-resume",
+        default="auto",
+        choices=["auto", "allow", "must", "never"],
+        help="W&B resume policy. auto: reuse run id from output_dir when --resume is set.",
+    )
     parser.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
 
     # distributed
@@ -658,21 +700,60 @@ def _build_wandb_logger(args):
     if not run_name:
         run_name = os.path.basename(os.path.normpath(args.output_dir))
 
+    run_id = str(getattr(args, "wandb_id", "") or "").strip()
+    if not run_id:
+        run_id = str(os.environ.get("WANDB_RUN_ID", "") or "").strip()
+    resume_policy = str(getattr(args, "wandb_resume", "auto") or "auto").strip().lower()
+    if resume_policy not in {"auto", "allow", "must", "never"}:
+        raise ValueError(
+            f"Unsupported --wandb-resume '{resume_policy}'. "
+            "Use one of: auto/allow/must/never"
+        )
+
+    if (not run_id) and bool(getattr(args, "resume", "")) and resume_policy != "never":
+        meta = _load_wandb_run_meta(args.output_dir)
+        run_id = str(meta.get("id", "") or "").strip()
+        if run_id:
+            print(f"W&B resume: found existing run id '{run_id}' in {args.output_dir}")
+
+    if resume_policy == "auto":
+        if run_id:
+            resume_mode = "must" if bool(getattr(args, "resume", "")) else "allow"
+        else:
+            resume_mode = None
+    else:
+        resume_mode = resume_policy
+
+    if resume_mode == "must" and not run_id:
+        raise ValueError("--wandb-resume must requires --wandb-id or existing wandb_run_meta.json")
+
     wandb_logger = WandbLogger(enabled=True)
     wandb_logger.init(
         project=str(getattr(args, "wandb_project", "m3vit-pretrain") or "m3vit-pretrain"),
         entity=getattr(args, "wandb_entity", None),
         name=run_name,
         config=vars(args),
+        resume=resume_mode,
+        id=run_id or None,
     )
     set_wandb_logger(wandb_logger)
     if wandb_logger.run is not None:
         wandb_logger.run.config.update({"output_dir": args.output_dir}, allow_val_change=True)
+        _save_wandb_run_meta(args.output_dir, wandb_logger.run)
+        args.wandb_id = str(getattr(wandb_logger.run, "id", "") or "")
 
-    for path in (args.config_path, args.config, os.path.join(args.output_dir, "run_args.json")):
+    for path in (
+        args.config_path,
+        args.config,
+        os.path.join(args.output_dir, "run_args.json"),
+        _wandb_run_meta_path(args.output_dir),
+    ):
         if path and os.path.exists(path):
             wandb.save(path)
-    print(f"W&B enabled: project={args.wandb_project}, run={run_name}, mode={wandb_mode}")
+    print(
+        f"W&B enabled: project={args.wandb_project}, run={run_name}, mode={wandb_mode}, "
+        f"resume={resume_mode}, id={run_id or args.wandb_id or 'new'}"
+    )
     return wandb_logger
 
 
