@@ -100,6 +100,12 @@ def save_checkpoint(
     is_best=False,
     model_ema=None,
 ):
+    should_save_periodic = ((epoch + 1) % int(args.save_freq) == 0)
+    should_save_best = bool(is_best)
+    should_save_any = should_save_periodic or should_save_best
+    if not should_save_any:
+        return
+
     model_to_save = _unwrap_model(model)
     local_model_state = model_to_save.state_dict()
     rank = get_rank()
@@ -161,7 +167,7 @@ def save_checkpoint(
     save_on_master(state, latest_path)
     save_on_master(mtl_payload, os.path.join(args.output_dir, "mtl_latest_global.pth"))
 
-    if (epoch + 1) % args.save_freq == 0:
+    if should_save_periodic:
         epoch_path = os.path.join(args.output_dir, f"checkpoint_{epoch + 1:04d}.pth")
         if world_size > 1:
             torch.save(state, _ranked_path(epoch_path, rank))
