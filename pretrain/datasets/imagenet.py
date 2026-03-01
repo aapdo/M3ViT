@@ -1,7 +1,9 @@
 """ImageNet datasets and dataloaders."""
 
+import argparse
 import io
 import hashlib
+import json
 import os
 import tempfile
 import time
@@ -461,6 +463,219 @@ def _load_or_build_imagefolder_index(split_dir):
     return index
 
 
+def _build_split_class_mapping(split_dir):
+    classes = sorted([d.name for d in os.scandir(split_dir) if d.is_dir()])
+    class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
+    return classes, class_to_idx
+
+
+def _inspect_imagefolder_cache(split_dir, cache_path, fs_classes, fs_class_to_idx):
+    report = {
+        "path": cache_path,
+        "status": "missing",
+        "reason": "",
+        "num_classes": 0,
+        "num_samples": 0,
+        "classes_match_split": False,
+        "class_to_idx_match_split": False,
+    }
+    if not os.path.isfile(cache_path):
+        report["reason"] = "cache file not found"
+        return report
+
+    try:
+        payload = torch.load(cache_path, map_location="cpu")
+    except Exception as exc:
+        report["status"] = "invalid"
+        report["reason"] = f"failed to read cache: {exc}"
+        return report
+
+    if not isinstance(payload, dict):
+        report["status"] = "invalid"
+        report["reason"] = "payload is not a dict"
+        return report
+
+    version = int(payload.get("version", -1))
+    if version != _IMAGEFOLDER_INDEX_CACHE_VERSION:
+        report["status"] = "invalid"
+        report["reason"] = (
+            f"version mismatch (found={version}, expected={_IMAGEFOLDER_INDEX_CACHE_VERSION})"
+        )
+        return report
+
+    classes = payload.get("classes")
+    class_to_idx = payload.get("class_to_idx")
+    samples = payload.get("samples")
+    if not isinstance(classes, list) or not isinstance(class_to_idx, dict):
+        report["status"] = "invalid"
+        report["reason"] = "bad classes/class_to_idx format"
+        return report
+
+    normalized_samples = _normalize_cached_samples(samples)
+    if normalized_samples is None:
+        report["status"] = "invalid"
+        report["reason"] = "bad samples format"
+        return report
+
+    if not _validate_cached_samples(split_dir, normalized_samples):
+        report["status"] = "stale"
+        report["reason"] = "sample paths look stale/missing"
+        return report
+
+    report["status"] = "ok"
+    report["reason"] = "cache is valid"
+    report["num_classes"] = len(classes)
+    report["num_samples"] = len(normalized_samples)
+    report["classes_match_split"] = (list(classes) == list(fs_classes))
+    report["class_to_idx_match_split"] = (dict(class_to_idx) == dict(fs_class_to_idx))
+    return report
+
+
+def check_local_imagenet_label_mapping(data_path):
+    """
+    Check train/val class mapping consistency and cache health for local ImageFolder.
+
+    Args:
+        data_path: ImageNet root containing train/ and val/.
+    Returns:
+        Dict with consistency and cache validation details.
+    """
+    root = os.path.abspath(os.path.expanduser(str(data_path)))
+    train_dir = os.path.join(root, "train")
+    val_dir = os.path.join(root, "val")
+
+    report = {
+        "data_path": root,
+        "splits": {},
+        "checks": {},
+    }
+
+    split_dirs_exist = os.path.isdir(train_dir) and os.path.isdir(val_dir)
+    report["checks"]["split_dirs_exist"] = split_dirs_exist
+
+    for split_name, split_dir in (("train", train_dir), ("val", val_dir)):
+        split_info = {
+            "split_dir": split_dir,
+            "exists": os.path.isdir(split_dir),
+            "num_classes": 0,
+            "classes_head": [],
+            "classes_tail": [],
+            "cache_reports": [],
+        }
+        if split_info["exists"]:
+            classes, class_to_idx = _build_split_class_mapping(split_dir)
+            split_info["num_classes"] = len(classes)
+            split_info["classes_head"] = classes[:5]
+            split_info["classes_tail"] = classes[-5:]
+
+            cache_reports = []
+            for cache_path in _imagefolder_cache_paths(split_dir):
+                cache_reports.append(
+                    _inspect_imagefolder_cache(
+                        split_dir=split_dir,
+                        cache_path=cache_path,
+                        fs_classes=classes,
+                        fs_class_to_idx=class_to_idx,
+                    )
+                )
+            split_info["cache_reports"] = cache_reports
+        report["splits"][split_name] = split_info
+
+    train_exists = report["splits"]["train"]["exists"]
+    val_exists = report["splits"]["val"]["exists"]
+    if train_exists and val_exists:
+        train_classes, train_class_to_idx = _build_split_class_mapping(train_dir)
+        val_classes, val_class_to_idx = _build_split_class_mapping(val_dir)
+        report["checks"]["train_val_classes_identical"] = (train_classes == val_classes)
+        report["checks"]["train_val_class_to_idx_identical"] = (train_class_to_idx == val_class_to_idx)
+    else:
+        report["checks"]["train_val_classes_identical"] = False
+        report["checks"]["train_val_class_to_idx_identical"] = False
+
+    cache_reports_all = []
+    for split_name in ("train", "val"):
+        cache_reports_all.extend(report["splits"][split_name]["cache_reports"])
+
+    cache_valid_or_missing = all(
+        c["status"] in {"ok", "missing"} for c in cache_reports_all
+    ) if cache_reports_all else True
+    cache_mapping_consistent = all(
+        (c["status"] != "ok") or (c["classes_match_split"] and c["class_to_idx_match_split"])
+        for c in cache_reports_all
+    ) if cache_reports_all else True
+
+    report["checks"]["cache_files_valid_or_missing"] = cache_valid_or_missing
+    report["checks"]["cache_mapping_consistent"] = cache_mapping_consistent
+    report["checks"]["all_pass"] = all(report["checks"].values())
+    return report
+
+
+def _format_label_mapping_report(report):
+    lines = []
+    lines.append(f"data_path: {report['data_path']}")
+    lines.append("checks:")
+    for key, value in report.get("checks", {}).items():
+        lines.append(f"  - {key}: {value}")
+
+    for split_name in ("train", "val"):
+        s = report["splits"].get(split_name, {})
+        lines.append(f"{split_name}:")
+        lines.append(f"  - split_dir: {s.get('split_dir', '')}")
+        lines.append(f"  - exists: {s.get('exists', False)}")
+        lines.append(f"  - num_classes: {s.get('num_classes', 0)}")
+        lines.append(f"  - classes_head: {s.get('classes_head', [])}")
+        lines.append(f"  - classes_tail: {s.get('classes_tail', [])}")
+        for cache_report in s.get("cache_reports", []):
+            lines.append(
+                "  - cache: "
+                f"path={cache_report['path']} status={cache_report['status']} "
+                f"reason={cache_report['reason']} "
+                f"classes_match_split={cache_report['classes_match_split']} "
+                f"class_to_idx_match_split={cache_report['class_to_idx_match_split']} "
+                f"num_classes={cache_report['num_classes']} num_samples={cache_report['num_samples']}"
+            )
+    return "\n".join(lines)
+
+
+def _main():
+    parser = argparse.ArgumentParser(
+        description="Local ImageNet label/class mapping checker for ImageFolder + cache."
+    )
+    parser.add_argument(
+        "--data-path",
+        required=True,
+        type=str,
+        help="ImageNet root path containing train/ and val/ directories.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON report instead of human-readable text.",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit non-zero if any check fails (including cache warnings).",
+    )
+    args = parser.parse_args()
+
+    report = check_local_imagenet_label_mapping(args.data_path)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(_format_label_mapping_report(report))
+
+    critical_ok = (
+        report["checks"].get("split_dirs_exist", False)
+        and report["checks"].get("train_val_classes_identical", False)
+        and report["checks"].get("train_val_class_to_idx_identical", False)
+    )
+    if not critical_ok:
+        raise SystemExit(2)
+    if args.strict and not report["checks"].get("all_pass", False):
+        raise SystemExit(3)
+
+
 class IndexedImageFolder(Dataset):
     """ImageFolder-compatible dataset built from cached index."""
 
@@ -582,3 +797,7 @@ def build_imagenet_loaders(dataset_train, dataset_val, args):
     )
 
     return loader_train, loader_val
+
+
+if __name__ == "__main__":
+    _main()
