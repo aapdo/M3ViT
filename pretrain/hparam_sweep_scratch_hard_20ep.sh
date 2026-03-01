@@ -99,6 +99,7 @@ for r_i in "${!ROUTER_GRID[@]}"; do
       --distilled true
       --distillation-alpha "${HARD_ALPHA}"
       --moe-top-k 4
+      --moe-data-distributed true
       --moe-cv-weight "${moe_cv_weight}"
       --vmoe-noisy-std "${vmoe_noisy_std}"
       --mixup "${mixup}"
