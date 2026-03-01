@@ -11,6 +11,7 @@ This directory provides a DeiT-inspired pretraining pipeline for MoE ViT encoder
 ## Main entrypoints
 
 - `pretrain/train.py`: ImageNet pretrain for MoE ViT classification.
+- `pretrain/Dense_DeiT.py`: single-file Dense DeiT (model classes + training/eval loop).
 - `pretrain/export_to_mtl.py`: Convert pretrain checkpoint to MTL-compatible checkpoint.
 
 ## Checkpoint outputs
@@ -59,6 +60,16 @@ torchrun --nproc_per_node=8 pretrain/train.py \
   --use-wandb \
   --wandb-project m3vit-pretrain \
   --wandb-name deit_moe_small
+```
+
+Dense DeiT baseline training (no MoE dependency in model definition):
+
+```bash
+torchrun --nproc_per_node=8 --module pretrain.Dense_DeiT \
+  --config pretrain/configs/deit_dense_small.yaml \
+  --config-path configs/path_env.yml \
+  --dataset-name ImageNet1K \
+  --output-dir /path/to/output_dense_deit
 ```
 
 If that local path does not contain `train/` and `val/`, the loader will

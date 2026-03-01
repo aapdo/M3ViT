@@ -554,6 +554,33 @@ def parse_args():
     return args
 
 
+def _strip_common_state_dict_prefix(state_dict, model_keys):
+    """Strip common wrappers (e.g. module.) when checkpoint keys are prefixed."""
+    if not isinstance(state_dict, dict) or not state_dict:
+        return state_dict
+
+    for prefix in ("module.", "model.", "model.module."):
+        prefixed_keys = [k for k in state_dict.keys() if isinstance(k, str) and k.startswith(prefix)]
+        if len(prefixed_keys) < max(1, int(0.8 * len(state_dict))):
+            continue
+        stripped = {}
+        for k, v in state_dict.items():
+            if isinstance(k, str) and k.startswith(prefix):
+                stripped[k[len(prefix) :]] = v
+            else:
+                stripped[k] = v
+        overlap_before = sum(1 for k in state_dict.keys() if k in model_keys)
+        overlap_after = sum(1 for k in stripped.keys() if k in model_keys)
+        if overlap_after > overlap_before:
+            if is_main_process():
+                print(
+                    f"[Teacher] stripped checkpoint key prefix '{prefix}' "
+                    f"(overlap {overlap_before} -> {overlap_after})"
+                )
+            return stripped
+    return state_dict
+
+
 def build_teacher_model(args, device):
     if args.distillation_type == "none":
         return None
@@ -569,12 +596,41 @@ def build_teacher_model(args, device):
 
     if "model" in checkpoint:
         teacher_state = checkpoint["model"]
+    elif "model_ema" in checkpoint:
+        teacher_state = checkpoint["model_ema"]
     elif "state_dict" in checkpoint:
         teacher_state = checkpoint["state_dict"]
     else:
         teacher_state = checkpoint
 
-    teacher.load_state_dict(teacher_state, strict=False)
+    model_keys = set(teacher.state_dict().keys())
+    teacher_state = _strip_common_state_dict_prefix(teacher_state, model_keys)
+
+    load_info = teacher.load_state_dict(teacher_state, strict=False)
+    missing = list(getattr(load_info, "missing_keys", []) or [])
+    unexpected = list(getattr(load_info, "unexpected_keys", []) or [])
+    num_model_keys = len(model_keys)
+    num_loaded_keys = max(0, num_model_keys - len(missing))
+    loaded_ratio = float(num_loaded_keys) / float(max(num_model_keys, 1))
+
+    if is_main_process():
+        print(
+            "[Teacher] load summary: "
+            f"loaded={num_loaded_keys}/{num_model_keys} ({loaded_ratio:.1%}), "
+            f"missing={len(missing)}, unexpected={len(unexpected)}"
+        )
+        if missing:
+            print(f"[Teacher] sample missing keys: {missing[:10]}")
+        if unexpected:
+            print(f"[Teacher] sample unexpected keys: {unexpected[:10]}")
+
+    if loaded_ratio < 0.5:
+        raise RuntimeError(
+            "Teacher checkpoint appears incompatible with teacher model "
+            f"({num_loaded_keys}/{num_model_keys} keys loaded). "
+            "Please verify --teacher-model and --teacher-path."
+        )
+
     teacher.to(device)
     teacher.eval()
     for p in teacher.parameters():

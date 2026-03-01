@@ -28,6 +28,7 @@ TOPK="${TOPK:-2}"
 
 SOFT_ALPHA="${SOFT_ALPHA:-0.5}"
 SOFT_TAU="${SOFT_TAU:-1.0}"
+HARD_ALPHA="${HARD_ALPHA:-0.5}"
 
 USE_WANDB="${USE_WANDB:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-pretrain}"
@@ -84,6 +85,7 @@ FULL_SAVE_FREQ=${FULL_SAVE_FREQ} \\
 TOPK=${TOPK} \\
 SOFT_ALPHA=${SOFT_ALPHA} \\
 SOFT_TAU=${SOFT_TAU} \\
+HARD_ALPHA=${HARD_ALPHA} \\
 USE_WANDB=${USE_WANDB} \\
 WANDB_PROJECT=${WANDB_PROJECT} \\
 RUN_NO_DISTILL=${RUN_NO_DISTILL} \\
@@ -119,7 +121,7 @@ append_distill_args() {
       CMD+=(--distillation-type none --distilled false)
       ;;
     *_hard)
-      CMD+=(--distillation-type hard --distilled true)
+      CMD+=(--distillation-type hard --distilled true --distillation-alpha "${HARD_ALPHA}")
       ;;
     *_soft)
       CMD+=(--distillation-type soft --distilled true --distillation-alpha "${SOFT_ALPHA}" --distillation-tau "${SOFT_TAU}")

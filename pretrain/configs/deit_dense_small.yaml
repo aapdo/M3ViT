@@ -1,0 +1,79 @@
+# Setup
+setup: pretrain
+
+# Dataset
+train_db_name: ImageNet1K
+val_db_name: ImageNet1K
+trBatch: 64
+valBatch: 96
+nworkers: 10
+input_size: 224
+nb_classes: 1000
+
+# Optimizer / scheduler (DeiT defaults)
+epochs: 300
+optimizer: adamw
+optimizer_kwargs:
+  lr: 0.0005
+  momentum: 0.9
+  weight_decay: 0.05
+  opt_betas: [0.9, 0.999]
+  opt_eps: 1.0e-8
+scheduler: cosine
+scheduler_kwargs:
+  warmup_epochs: 5
+  min_lr: 1.0e-5
+  unscale_lr: false
+
+# Dense DeiT model
+model: deit_small
+backbone: DenseDeiT
+backbone_kwargs:
+  model_name: deit_small_patch16_224
+  img_size: 224
+  patch_size: 16
+  in_chans: 3
+  embed_dim: 384
+  depth: 12
+  num_heads: 6
+  num_classes: 1000
+
+  mlp_ratio: 4.0
+  qkv_bias: true
+  distilled: false
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+
+# Augmentation (DeiT defaults)
+aug_kwargs:
+  color_jitter: 0.3
+  aa: rand-m9-mstd0.5-inc1
+  train_interpolation: bicubic
+  reprob: 0.25
+  remode: pixel
+  recount: 1
+  repeated_aug: true
+
+  mixup: 0.8
+  cutmix: 1.0
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  mixup_mode: batch
+  smoothing: 0.1
+
+# Distillation (optional; disabled by default)
+distillation_kwargs:
+  distillation_type: none
+  teacher_model: regnety_160
+  teacher_path: "https://dl.fbaipublicfiles.com/deit/regnety_160-a5fe301d.pth"
+  distillation_alpha: 0.5
+  distillation_tau: 1.0
+
+# Runtime
+seed: 0
+amp: true
+pin_mem: true
+dist_eval: false
+print_freq: 50
+save_freq: 10
