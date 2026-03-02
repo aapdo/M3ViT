@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 20-epoch hyperparameter sweep for MoE pretraining
-# - init: scratch
+# - init: controlled by INIT_MODE (scratch | deit_warm_start)
 # - distillation: hard
 # - eval every 5 epochs
 # - each run logs to a separate W&B run (project: pretrain_test by default)
@@ -23,6 +23,8 @@ EVAL_FREQ="${EVAL_FREQ:-5}"
 SAVE_FREQ="${SAVE_FREQ:-5}"
 
 HARD_ALPHA="${HARD_ALPHA:-0.5}"
+INIT_MODE="${INIT_MODE:-scratch}"   # scratch | deit_warm_start
+WARM_MOE_MLP_RATIO="${WARM_MOE_MLP_RATIO:-1.0}"
 
 USE_WANDB="${USE_WANDB:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-pretrain_test}"
@@ -31,7 +33,14 @@ WANDB_PROJECT="${WANDB_PROJECT:-pretrain_test}"
 SPLIT_ID="${SPLIT_ID:-0}"
 
 RUN_TAG="${RUN_TAG:-$(date +%m%d_%H%M)}"
-GROUP_NAME="${GROUP_NAME:-deit_small_scratch_hard_grid20}"
+GROUP_NAME="${GROUP_NAME:-}"
+if [[ -z "${GROUP_NAME}" ]]; then
+  if [[ "${INIT_MODE}" == "deit_warm_start" ]]; then
+    GROUP_NAME="deit_small_warmstart_hard_grid20"
+  else
+    GROUP_NAME="deit_small_scratch_hard_grid20"
+  fi
+fi
 BASE_OUT="${BASE_OUT:-output_dir/pretrain/${GROUP_NAME}}"
 BASE_LOG="${BASE_LOG:-logs/pretrain/${GROUP_NAME}}"
 
@@ -50,11 +59,19 @@ declare -a AUG_GRID=(
   "0.2,0.0,0.0"
 )
 
+# Priority order by aug setting id:
+# a3 -> a2 -> a1
+declare -a AUG_PRIORITY=(2 1 0)
+
 echo "== Sweep config =="
 echo "RUN_TAG=${RUN_TAG}"
 echo "CONFIG=${CONFIG}"
 echo "EPOCHS=${EPOCHS}, EVAL_FREQ=${EVAL_FREQ}, SAVE_FREQ=${SAVE_FREQ}"
 echo "GROUP_NAME=${GROUP_NAME}"
+echo "INIT_MODE=${INIT_MODE}"
+if [[ "${INIT_MODE}" == "deit_warm_start" ]]; then
+  echo "WARM_MOE_MLP_RATIO=${WARM_MOE_MLP_RATIO}"
+fi
 echo "BASE_OUT=${BASE_OUT}"
 echo "BASE_LOG=${BASE_LOG}"
 echo "SPLIT_ID=${SPLIT_ID} (0=all, 1=1/4/7, 2=2/5/8, 3=3/6/9)"
@@ -65,12 +82,20 @@ if ! [[ "${SPLIT_ID}" =~ ^[0-3]$ ]]; then
   exit 2
 fi
 
+case "${INIT_MODE}" in
+  scratch|deit_warm_start)
+    ;;
+  *)
+    echo "[ERROR] INIT_MODE must be one of: scratch, deit_warm_start. got='${INIT_MODE}'" >&2
+    exit 2
+    ;;
+esac
+
 run_idx=0
 run_sel=0
-for r_i in "${!ROUTER_GRID[@]}"; do
-  IFS=',' read -r moe_cv_weight vmoe_noisy_std <<< "${ROUTER_GRID[$r_i]}"
-
-  for a_i in "${!AUG_GRID[@]}"; do
+for a_i in "${AUG_PRIORITY[@]}"; do
+  for r_i in "${!ROUTER_GRID[@]}"; do
+    IFS=',' read -r moe_cv_weight vmoe_noisy_std <<< "${ROUTER_GRID[$r_i]}"
     IFS=',' read -r mixup cutmix smoothing <<< "${AUG_GRID[$a_i]}"
 
     run_idx=$((run_idx + 1))
@@ -94,7 +119,7 @@ for r_i in "${!ROUTER_GRID[@]}"; do
       --eval-freq "${EVAL_FREQ}"
       --save-freq "${SAVE_FREQ}"
       --output-dir "${out_dir}"
-      --deit-init-mode scratch
+      --deit-init-mode "${INIT_MODE}"
       --distillation-type hard
       --distilled true
       --distillation-alpha "${HARD_ALPHA}"
@@ -107,6 +132,10 @@ for r_i in "${!ROUTER_GRID[@]}"; do
       --smoothing "${smoothing}"
       --wandb-resume never
     )
+
+    if [[ "${INIT_MODE}" == "deit_warm_start" ]]; then
+      CMD+=(--moe-mlp-ratio "${WARM_MOE_MLP_RATIO}")
+    fi
 
     if [[ "${USE_WANDB,,}" == "true" ]]; then
       CMD+=(--use-wandb --wandb-project "${WANDB_PROJECT}" --wandb-name "${run_name}")
