@@ -91,6 +91,8 @@ def normalize_config(cfg):
     _set_if_absent(out, "amp", _maybe_get(cfg, "amp"))
     _set_if_absent(out, "pin_mem", _maybe_get(cfg, "pin_mem"))
     _set_if_absent(out, "dist_eval", _maybe_get(cfg, "dist_eval"))
+    _set_if_absent(out, "debug_data", _maybe_get(cfg, "debug_data"))
+    _set_if_absent(out, "debug_data_max", _maybe_get(cfg, "debug_data_max"))
 
     opt_kwargs = _maybe_get(cfg, "optimizer_kwargs") or {}
     _set_if_absent(out, "opt", _maybe_get(cfg, "optimizer"))
@@ -777,6 +779,63 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, sca
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+def _dataset_label_preview(dataset, max_items):
+    max_items = max(0, int(max_items))
+    if max_items == 0:
+        return []
+
+    targets = getattr(dataset, "targets", None)
+    if isinstance(targets, (list, tuple)):
+        return [int(x) for x in list(targets)[:max_items]]
+
+    hf_dataset = getattr(dataset, "hf_dataset", None)
+    if hf_dataset is not None:
+        out = []
+        limit = min(len(hf_dataset), max_items)
+        for i in range(limit):
+            try:
+                row = hf_dataset[i]
+                out.append(int(row["label"]))
+            except Exception:
+                break
+        return out
+    return []
+
+
+def _class_mapping_preview(dataset, max_items):
+    max_items = max(1, int(max_items))
+    class_to_idx = getattr(dataset, "class_to_idx", None)
+    if isinstance(class_to_idx, dict) and class_to_idx:
+        items = sorted(class_to_idx.items(), key=lambda kv: int(kv[1]))
+        return items[:max_items], items[-max_items:]
+
+    classes = getattr(dataset, "classes", None)
+    if isinstance(classes, (list, tuple)) and len(classes) > 0:
+        items = [(str(name), i) for i, name in enumerate(classes)]
+        return items[:max_items], items[-max_items:]
+    return [], []
+
+
+def _print_data_pipeline_debug(args, dataset_train, dataset_val):
+    if not bool(getattr(args, "debug_data", False)):
+        return
+    if not is_main_process():
+        return
+
+    max_items = max(1, int(getattr(args, "debug_data_max", 8)))
+    print("[DataDebug] enabled")
+    for split_name, dataset in (("train", dataset_train), ("val", dataset_val)):
+        d_type = f"{type(dataset).__module__}.{type(dataset).__name__}"
+        print(f"[DataDebug][{split_name}] dataset_type={d_type} len={len(dataset)}")
+        head, tail = _class_mapping_preview(dataset, max_items=max_items)
+        if head:
+            print(f"[DataDebug][{split_name}] class_mapping_head={head}")
+            print(f"[DataDebug][{split_name}] class_mapping_tail={tail}")
+        labels = _dataset_label_preview(dataset, max_items=max_items)
+        if labels:
+            print(f"[DataDebug][{split_name}] first_labels={labels}")
+
+
 @torch.no_grad()
 def evaluate(data_loader, model, device, args):
     criterion = nn.CrossEntropyLoss()
@@ -788,6 +847,7 @@ def evaluate(data_loader, model, device, args):
     correct1_sum = 0.0
     correct5_sum = 0.0
     sample_count = 0
+    debug_batch_logged = False
 
     for images, target in metric_logger.log_every(data_loader, args.print_freq, header):
         images = images.to(device, non_blocking=True)
@@ -798,6 +858,15 @@ def evaluate(data_loader, model, device, args):
             if isinstance(logits, tuple):
                 logits = logits[0]
             loss = criterion(logits, target)
+
+        if bool(getattr(args, "debug_data", False)) and (not debug_batch_logged) and is_main_process():
+            max_items = max(1, int(getattr(args, "debug_data_max", 8)))
+            topk = min(5, int(logits.shape[-1]))
+            pred_idx = torch.topk(logits, k=topk, dim=1).indices[:max_items].detach().cpu().tolist()
+            target_list = target[:max_items].detach().cpu().tolist()
+            print(f"[DataDebug][eval] first_batch_targets={target_list}")
+            print(f"[DataDebug][eval] first_batch_top{topk}_pred_indices={pred_idx}")
+            debug_batch_logged = True
 
         acc1, acc5 = accuracy(logits, target, topk=(1, 5))
         bs = int(images.shape[0])
@@ -851,6 +920,8 @@ def get_args_parser():
     parser.add_argument("--eval-freq", default=10, type=int)
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--dev-test", default=False, type=str2bool)
+    parser.add_argument("--debug-data", default=False, type=str2bool)
+    parser.add_argument("--debug-data-max", default=8, type=int)
 
     parser.add_argument("--model", default="deit_small", choices=["deit_tiny", "deit_small", "deit_base"])
     parser.add_argument("--nb-classes", default=1000, type=int)
@@ -999,6 +1070,7 @@ def main():
         )
     dataset_train, dataset_val, nb_classes = build_imagenet_datasets(args)
     args.nb_classes = nb_classes
+    _print_data_pipeline_debug(args, dataset_train, dataset_val)
     loader_train, loader_val = build_imagenet_loaders(dataset_train, dataset_val, args)
 
     mixup_fn = None

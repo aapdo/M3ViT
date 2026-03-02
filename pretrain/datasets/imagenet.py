@@ -135,6 +135,62 @@ def _normalize_class_name(name):
     return text if text else "unknown"
 
 
+def _format_hf_class_dir_name(label, class_name):
+    """Encode label id into directory name to preserve ImageNet index ordering."""
+    safe_name = _normalize_class_name(class_name)
+    return f"{int(label):04d}_{safe_name}"
+
+
+def _parse_numeric_label_prefix(class_dir_name):
+    text = str(class_dir_name or "")
+    if len(text) < 6 or text[4] != "_":
+        return None
+    prefix = text[:4]
+    if not prefix.isdigit():
+        return None
+    return int(prefix)
+
+
+def _infer_imagefolder_class_mapping(class_dir_names):
+    classes_sorted = sorted(class_dir_names)
+    prefixed = []
+    for cls_name in classes_sorted:
+        idx = _parse_numeric_label_prefix(cls_name)
+        if idx is None:
+            prefixed = []
+            break
+        prefixed.append((cls_name, idx))
+
+    if prefixed:
+        ids = sorted(idx for _cls, idx in prefixed)
+        expected = list(range(len(prefixed)))
+        if ids == expected and len(set(ids)) == len(ids):
+            classes = [cls_name for cls_name, _idx in sorted(prefixed, key=lambda x: x[1])]
+            class_to_idx = {cls_name: idx for cls_name, idx in prefixed}
+            return classes, class_to_idx
+
+    # Fallback: torchvision ImageFolder-compatible alphabetical indexing.
+    classes = classes_sorted
+    class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
+    return classes, class_to_idx
+
+
+def _looks_like_human_readable_name_layout(split_dir):
+    class_names = sorted([d.name for d in os.scandir(split_dir) if d.is_dir()])
+    if not class_names:
+        return False
+
+    sample = class_names[: min(200, len(class_names))]
+    prefixed_ratio = sum(_parse_numeric_label_prefix(name) is not None for name in sample) / float(len(sample))
+    synset_ratio = sum(
+        (len(name) == 9 and name.startswith("n") and name[1:].isdigit()) for name in sample
+    ) / float(len(sample))
+    readable_ratio = sum(
+        ((" " in name) or ("," in name)) for name in sample
+    ) / float(len(sample))
+    return prefixed_ratio < 0.1 and synset_ratio < 0.1 and readable_ratio > 0.4
+
+
 def _has_local_imagefolder_split(split_dir):
     if not os.path.isdir(split_dir):
         return False
@@ -178,7 +234,8 @@ def _save_hf_split_to_imagefolder(hf_dataset, split_dir, class_names):
         sample = hf_dataset[idx]
         label = int(sample["label"])
         class_name = class_names[label] if 0 <= label < len(class_names) else str(label)
-        class_dir = os.path.join(split_dir, class_name)
+        class_dir_name = _format_hf_class_dir_name(label, class_name)
+        class_dir = os.path.join(split_dir, class_dir_name)
         os.makedirs(class_dir, exist_ok=True)
         image_ext = _infer_image_extension(sample["image"])
         image_path = os.path.join(class_dir, f"{idx:08d}{image_ext}")
@@ -377,11 +434,10 @@ def _serialize_imagefolder_index_for_cache(index, split_dir):
 
 def _scan_imagefolder_index(split_dir):
     split_dir = os.path.abspath(split_dir)
-    classes = sorted([d.name for d in os.scandir(split_dir) if d.is_dir()])
+    class_dir_names = [d.name for d in os.scandir(split_dir) if d.is_dir()]
+    classes, class_to_idx = _infer_imagefolder_class_mapping(class_dir_names)
     if not classes:
         raise RuntimeError(f"No class folders found under: {split_dir}")
-
-    class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
     valid_exts = tuple(e.lower() for e in IMG_EXTENSIONS)
 
     # Count phase with progress
@@ -477,8 +533,8 @@ def _load_or_build_imagefolder_index(split_dir):
 
 
 def _build_split_class_mapping(split_dir):
-    classes = sorted([d.name for d in os.scandir(split_dir) if d.is_dir()])
-    class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
+    class_dir_names = [d.name for d in os.scandir(split_dir) if d.is_dir()]
+    classes, class_to_idx = _infer_imagefolder_class_mapping(class_dir_names)
     return classes, class_to_idx
 
 
@@ -750,6 +806,17 @@ def build_imagenet_datasets(args):
         raise FileNotFoundError(f"ImageNet train dir not found or empty: {train_dir}")
     if not _has_local_imagefolder_split(val_dir):
         raise FileNotFoundError(f"ImageNet val dir not found or empty: {val_dir}")
+
+    if _is_main_data_rank():
+        if _looks_like_human_readable_name_layout(train_dir) and _looks_like_human_readable_name_layout(val_dir):
+            print(
+                "[ImageNetLoader][WARN] Detected human-readable class folder layout "
+                "(e.g. 'Afghan hound, Afghan'). ImageFolder will index classes by folder "
+                "name order, which can mismatch canonical ImageNet label ids expected by "
+                "official pretrained checkpoints. If eval looks near-random, prefer "
+                "--data-path hf://ILSVRC/imagenet-1k or rebuild local folders with "
+                "numeric prefixes like '0000_<class_name>'."
+            )
 
     loader_mode = _resolve_imagenet_loader_mode(args)
     if _is_main_data_rank():

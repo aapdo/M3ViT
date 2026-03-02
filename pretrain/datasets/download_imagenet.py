@@ -25,6 +25,16 @@ def parse_args():
     parser.add_argument("--token", default="", type=str, help="HF token (optional; env vars also supported)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing split folders")
     parser.add_argument("--progress-every", default=10000, type=int)
+    parser.add_argument(
+        "--class-dir-format",
+        default="prefixed",
+        choices=["prefixed", "name_only"],
+        help=(
+            "Class folder naming scheme. "
+            "'prefixed' writes '<label:04d>_<class_name>' and preserves canonical label indices. "
+            "'name_only' writes '<class_name>' (legacy; can cause label-index mismatch for pretrained eval)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -63,6 +73,17 @@ def load_hf_split(dataset_id, split, token=None, cache_dir=None):
 def normalize_class_name(name):
     text = str(name).strip().replace("/", "_").replace("\\", "_")
     return text if text else "unknown"
+
+
+def format_class_dir_name(label, class_name, mode="prefixed"):
+    safe_name = normalize_class_name(class_name)
+    if mode == "name_only":
+        return safe_name
+    return f"{int(label):04d}_{safe_name}"
+
+
+def build_class_dir_names(class_names, mode="prefixed"):
+    return [format_class_dir_name(i, name, mode=mode) for i, name in enumerate(class_names)]
 
 
 def infer_class_names(hf_dataset):
@@ -121,13 +142,15 @@ def save_image_field(image_field, image_path):
     image.save(image_path, format="JPEG", quality=95)
 
 
-def save_split_to_imagefolder(hf_dataset, split_dir, class_names, progress_every=10000):
+def save_split_to_imagefolder(hf_dataset, split_dir, class_dir_names, progress_every=10000):
     os.makedirs(split_dir, exist_ok=True)
     total = len(hf_dataset)
     for idx in range(total):
         sample = hf_dataset[idx]
         label = int(sample["label"])
-        class_name = class_names[label] if 0 <= label < len(class_names) else str(label)
+        class_name = (
+            class_dir_names[label] if 0 <= label < len(class_dir_names) else f"{int(label):04d}_unknown"
+        )
         class_dir = os.path.join(split_dir, class_name)
         os.makedirs(class_dir, exist_ok=True)
 
@@ -171,12 +194,21 @@ def main():
     print(f"[info] output_dir={output_dir}")
     print(f"[info] cache_dir={cache_dir}")
     print(f"[info] train_split={args.train_split}, val_split={args.val_split}")
+    print(f"[info] class_dir_format={args.class_dir_format}")
 
     class_names = None
+    class_dir_names = None
     if not train_exists or args.overwrite:
         train_hf = load_hf_split(dataset_id, split=args.train_split, token=token, cache_dir=cache_dir)
         class_names = infer_class_names(train_hf)
-        save_split_to_imagefolder(train_hf, train_dir, class_names, progress_every=args.progress_every)
+        class_dir_names = build_class_dir_names(class_names, mode=args.class_dir_format)
+        print(f"[info] sample class dirs: {class_dir_names[:3]} ... {class_dir_names[-3:]}")
+        save_split_to_imagefolder(
+            train_hf,
+            train_dir,
+            class_dir_names,
+            progress_every=args.progress_every,
+        )
     else:
         print(f"[skip] existing split: {train_dir}")
 
@@ -184,7 +216,15 @@ def main():
         val_hf = load_hf_split(dataset_id, split=args.val_split, token=token, cache_dir=cache_dir)
         if class_names is None:
             class_names = infer_class_names(val_hf)
-        save_split_to_imagefolder(val_hf, val_dir, class_names, progress_every=args.progress_every)
+        if class_dir_names is None:
+            class_dir_names = build_class_dir_names(class_names, mode=args.class_dir_format)
+            print(f"[info] sample class dirs: {class_dir_names[:3]} ... {class_dir_names[-3:]}")
+        save_split_to_imagefolder(
+            val_hf,
+            val_dir,
+            class_dir_names,
+            progress_every=args.progress_every,
+        )
     else:
         print(f"[skip] existing split: {val_dir}")
 
