@@ -83,6 +83,7 @@ def normalize_config(cfg):
     _set_if_absent(out, "batch_size", _maybe_get(cfg, "trBatch"))
     _set_if_absent(out, "workers", _maybe_get(cfg, "nworkers"))
     _set_if_absent(out, "dataset_name", _maybe_get(cfg, "train_db_name"))
+    _set_if_absent(out, "imagenet_loader_mode", _maybe_get(cfg, "imagenet_loader_mode"))
     _set_if_absent(out, "eval_freq", _maybe_get(cfg, "eval_freq"))
     _set_if_absent(out, "dev_test", _maybe_get(cfg, "dev_test"))
     _set_if_absent(out, "log_initializations", _maybe_get(cfg, "log_initializations"))
@@ -386,6 +387,13 @@ def get_args_parser():
     parser.add_argument("--dev-test", default=False, type=str2bool)
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--dataset-name", default="ImageNet1K", type=str)
+    parser.add_argument(
+        "--imagenet-loader-mode",
+        default="cache",
+        choices=["cache", "direct"],
+        type=str,
+        help="ImageNet local dataset loader mode: cache=indexed ImageFolder cache, direct=torchvision ImageFolder scan.",
+    )
 
     # model
     parser.add_argument("--model", default="moe_vit_small", type=str)

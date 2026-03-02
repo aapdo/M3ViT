@@ -79,6 +79,7 @@ def normalize_config(cfg):
     _set_if_absent(out, "workers", _maybe_get(cfg, "nworkers"))
     _set_if_absent(out, "dataset_name", _maybe_get(cfg, "train_db_name"))
     _set_if_absent(out, "data_path", _maybe_get(cfg, "data_path"))
+    _set_if_absent(out, "imagenet_loader_mode", _maybe_get(cfg, "imagenet_loader_mode"))
     _set_if_absent(out, "input_size", _maybe_get(cfg, "input_size"))
     _set_if_absent(out, "nb_classes", _maybe_get(cfg, "nb_classes"))
 
@@ -425,6 +426,16 @@ MODEL_SPECS = {
 }
 
 
+_DENSE_DEIT_OFFICIAL_URLS = {
+    ("deit_tiny", False): "https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
+    ("deit_tiny", True): "https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth",
+    ("deit_small", False): "https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
+    ("deit_small", True): "https://dl.fbaipublicfiles.com/deit/deit_small_distilled_patch16_224-649709d9.pth",
+    ("deit_base", False): "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+    ("deit_base", True): "https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_224-df68dfff.pth",
+}
+
+
 def build_dense_deit_model(args):
     if args.model not in MODEL_SPECS:
         raise ValueError(f"Unknown model '{args.model}'. Expected one of: {list(MODEL_SPECS.keys())}")
@@ -633,7 +644,62 @@ def _save_checkpoint(args, epoch, model, optimizer, scheduler, scaler, best_acc1
 def _auto_resume(args, model, optimizer=None, scheduler=None, scaler=None):
     if not args.resume:
         return 0, 0.0
-    resume_path = args.resume
+    resume_path = str(args.resume).strip()
+    resume_aliases = {"deit://official", "deit://default", "deit://warm-start"}
+
+    def _extract_model_state(checkpoint_obj):
+        if isinstance(checkpoint_obj, dict):
+            for key in ("model", "model_ema", "state_dict"):
+                state = checkpoint_obj.get(key)
+                if isinstance(state, dict):
+                    return state, key
+            if all(isinstance(k, str) for k in checkpoint_obj.keys()):
+                return checkpoint_obj, "root_state_dict"
+        raise RuntimeError(
+            "Unsupported checkpoint format. Expected a dict with one of "
+            "['model', 'model_ema', 'state_dict'] or a raw state_dict."
+        )
+
+    def _load_model_only(checkpoint_obj, source_name):
+        model_to_load = _unwrap_model(model)
+        model_keys = set(model_to_load.state_dict().keys())
+        model_state, state_src = _extract_model_state(checkpoint_obj)
+        model_state = _strip_common_state_dict_prefix(model_state, model_keys)
+        load_info = model_to_load.load_state_dict(model_state, strict=False)
+        missing = list(getattr(load_info, "missing_keys", []) or [])
+        unexpected = list(getattr(load_info, "unexpected_keys", []) or [])
+        total_keys = len(model_keys)
+        loaded_keys = max(0, total_keys - len(missing))
+        loaded_ratio = float(loaded_keys) / float(max(total_keys, 1))
+        if is_main_process():
+            print(
+                "[Resume] model load summary: "
+                f"source={source_name}({state_src}) "
+                f"loaded={loaded_keys}/{total_keys} ({loaded_ratio:.1%}), "
+                f"missing={len(missing)}, unexpected={len(unexpected)}"
+            )
+            if missing:
+                print(f"[Resume] sample missing keys: {missing[:10]}")
+            if unexpected:
+                print(f"[Resume] sample unexpected keys: {unexpected[:10]}")
+        return loaded_ratio
+
+    is_url = resume_path.startswith("http://") or resume_path.startswith("https://")
+    if resume_path in resume_aliases:
+        key = (str(args.model), bool(args.distilled))
+        if key not in _DENSE_DEIT_OFFICIAL_URLS:
+            raise ValueError(f"No official DeiT URL mapping for model/distilled={key}")
+        resume_path = _DENSE_DEIT_OFFICIAL_URLS[key]
+        is_url = True
+
+    if is_url:
+        if is_main_process():
+            print(f"Loading model weights from URL: {resume_path}")
+        checkpoint = load_state_dict_from_url(resume_path, map_location="cpu", progress=True)
+        _load_model_only(checkpoint, source_name=resume_path)
+        # URL checkpoints do not include optimizer/scheduler/scaler states.
+        return 0, 0.0
+
     if os.path.isdir(resume_path):
         resume_path = os.path.join(resume_path, "checkpoint_latest.pth")
     if not os.path.isfile(resume_path):
@@ -642,14 +708,16 @@ def _auto_resume(args, model, optimizer=None, scheduler=None, scaler=None):
     if is_main_process():
         print(f"Resuming from: {resume_path}")
     checkpoint = torch.load(resume_path, map_location="cpu")
-    _unwrap_model(model).load_state_dict(checkpoint["model"], strict=False)
-    if optimizer is not None and checkpoint.get("optimizer") is not None:
+    _load_model_only(checkpoint, source_name=resume_path)
+    if optimizer is not None and isinstance(checkpoint, dict) and checkpoint.get("optimizer") is not None:
         optimizer.load_state_dict(checkpoint["optimizer"])
-    if scheduler is not None and checkpoint.get("scheduler") is not None:
+    if scheduler is not None and isinstance(checkpoint, dict) and checkpoint.get("scheduler") is not None:
         scheduler.load_state_dict(checkpoint["scheduler"])
-    if scaler is not None and checkpoint.get("scaler") is not None:
+    if scaler is not None and isinstance(checkpoint, dict) and checkpoint.get("scaler") is not None:
         scaler.load_state_dict(checkpoint["scaler"])
-    return int(checkpoint.get("epoch", -1)) + 1, float(checkpoint.get("best_acc1", 0.0))
+    if isinstance(checkpoint, dict):
+        return int(checkpoint.get("epoch", -1)) + 1, float(checkpoint.get("best_acc1", 0.0))
+    return 0, 0.0
 
 
 def _resolve_output_dir(args):
@@ -770,6 +838,13 @@ def get_args_parser():
     parser.add_argument("--config-path", "--config-env", dest="config_path", default="configs/path_env.yml", type=str)
     parser.add_argument("--data-path", default="", type=str)
     parser.add_argument("--dataset-name", default="ImageNet1K", type=str)
+    parser.add_argument(
+        "--imagenet-loader-mode",
+        default="cache",
+        choices=["cache", "direct"],
+        type=str,
+        help="ImageNet local dataset loader mode: cache=indexed ImageFolder cache, direct=torchvision ImageFolder scan.",
+    )
     parser.add_argument("--output-dir", default="./output/pretrain_dense_deit", type=str)
     parser.add_argument("--resume", default="", type=str)
     parser.add_argument("--save-freq", default=10, type=int)

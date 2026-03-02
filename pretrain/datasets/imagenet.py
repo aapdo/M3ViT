@@ -237,6 +237,19 @@ def _dist_initialized():
     return torch.distributed.is_available() and torch.distributed.is_initialized()
 
 
+def _is_main_data_rank():
+    return (not _dist_initialized()) or torch.distributed.get_rank() == 0
+
+
+def _resolve_imagenet_loader_mode(args):
+    mode = str(getattr(args, "imagenet_loader_mode", "cache") or "cache").strip().lower()
+    if mode not in {"cache", "direct"}:
+        raise ValueError(
+            f"Unsupported imagenet_loader_mode={mode!r}. Expected one of ['cache', 'direct']."
+        )
+    return mode
+
+
 def _safe_torch_save(obj, path):
     cache_dir = os.path.dirname(path)
     try:
@@ -738,12 +751,27 @@ def build_imagenet_datasets(args):
     if not _has_local_imagefolder_split(val_dir):
         raise FileNotFoundError(f"ImageNet val dir not found or empty: {val_dir}")
 
-    dataset_train = _build_imagefolder_dataset(
-        train_dir, transform=build_imagenet_transform(True, args)
-    )
-    dataset_val = _build_imagefolder_dataset(
-        val_dir, transform=build_imagenet_transform(False, args)
-    )
+    loader_mode = _resolve_imagenet_loader_mode(args)
+    if _is_main_data_rank():
+        print(
+            "[ImageNetLoader] mode="
+            f"{loader_mode} train_dir={train_dir} val_dir={val_dir}"
+        )
+
+    if loader_mode == "direct":
+        dataset_train = datasets.ImageFolder(
+            train_dir, transform=build_imagenet_transform(True, args)
+        )
+        dataset_val = datasets.ImageFolder(
+            val_dir, transform=build_imagenet_transform(False, args)
+        )
+    else:
+        dataset_train = _build_imagefolder_dataset(
+            train_dir, transform=build_imagenet_transform(True, args)
+        )
+        dataset_val = _build_imagefolder_dataset(
+            val_dir, transform=build_imagenet_transform(False, args)
+        )
     return dataset_train, dataset_val, len(dataset_train.classes)
 
 
