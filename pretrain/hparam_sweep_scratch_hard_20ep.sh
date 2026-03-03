@@ -31,6 +31,8 @@ WANDB_PROJECT="${WANDB_PROJECT:-pretrain_test}"
 
 # 0 = run all 9; 1/2/3 = run one split only (1,4,7 / 2,5,8 / 3,6,9)
 SPLIT_ID="${SPLIT_ID:-0}"
+# Global run index to start from (1..9). Useful for partial reruns.
+START_FROM="${START_FROM:-1}"
 
 RUN_TAG="${RUN_TAG:-$(date +%m%d_%H%M)}"
 GROUP_NAME="${GROUP_NAME:-}"
@@ -75,10 +77,16 @@ fi
 echo "BASE_OUT=${BASE_OUT}"
 echo "BASE_LOG=${BASE_LOG}"
 echo "SPLIT_ID=${SPLIT_ID} (0=all, 1=1/4/7, 2=2/5/8, 3=3/6/9)"
+echo "START_FROM=${START_FROM} (global index; 1..9)"
 echo
 
 if ! [[ "${SPLIT_ID}" =~ ^[0-3]$ ]]; then
   echo "[ERROR] SPLIT_ID must be one of 0,1,2,3. got='${SPLIT_ID}'" >&2
+  exit 2
+fi
+
+if ! [[ "${START_FROM}" =~ ^[0-9]+$ ]] || (( START_FROM < 1 || START_FROM > 9 )); then
+  echo "[ERROR] START_FROM must be an integer in [1, 9]. got='${START_FROM}'" >&2
   exit 2
 fi
 
@@ -99,6 +107,9 @@ for a_i in "${AUG_PRIORITY[@]}"; do
     IFS=',' read -r mixup cutmix smoothing <<< "${AUG_GRID[$a_i]}"
 
     run_idx=$((run_idx + 1))
+    if (( run_idx < START_FROM )); then
+      continue
+    fi
     split_bucket=$(( ((run_idx - 1) % 3) + 1 ))
     if [[ "${SPLIT_ID}" != "0" && "${split_bucket}" != "${SPLIT_ID}" ]]; then
       continue
