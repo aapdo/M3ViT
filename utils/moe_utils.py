@@ -1,8 +1,8 @@
 from collections import OrderedDict
-from models.gate_funs.noisy_gate import NoisyGate
-from models.gate_funs.ckpt_noisy_gate_vmoe import NoisyGate_VMoE
-from models.gates import NoisyGate_VMoE as Custom_NoisyGate_VMoE
-from models.ckpt_custom_moe_layer import FMoETransformerMLP
+from models.moe.noisy_gate import NoisyGate
+from models.moe.ckpt.noisy_gate_vmoe import NoisyGate_VMoE
+from models.moe.gates import NoisyGate_VMoE as Custom_NoisyGate_VMoE
+from models.moe.ckpt.custom_moe_layer import FMoETransformerMLP
 import torch.distributed
 import os
 

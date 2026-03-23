@@ -10,7 +10,7 @@ from re import A
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.resnet import Bottleneck
+from models.backbones.resnet import Bottleneck
 from models.layers import SEBlock, SABlock
 from mmcv.cnn import build_norm_layer
 from functools import partial
@@ -50,7 +50,7 @@ class InitialTaskPredictionModule(nn.Module):
             else:
                 out['features_%s' %(task)] = self.layers[task](x)
             out[task] = self.conv_out[task](out['features_%s' %(task)])
-            # print('feature,task',out['features_%s' %(task)].shape,out[task].shape)
+        
         return out 
 
 
@@ -94,7 +94,6 @@ class AffinityDiffusionModule(nn.Module):
         # self.alpha = {task:{t:nn.Parameter(torch.Tensor([1]), requires_grad=True) for t in self.auxilary_tasks} for task in self.tasks}
         self.beta=beta
         self.iteration = iterations
-        print('self.iteration', self.iteration)
         self.alpha = {}
         for task in self.tasks:
             alpha = {}
@@ -165,15 +164,6 @@ class PAPNet_vit(nn.Module):
           
         # Backbone
         self.backbone = backbone
-        if 'multi_level' in p:
-            self.multi_level = p['multi_level']
-        else:
-            self.multi_level = False
-
-        self.inplace=True
-        if self.multi_level:
-            self.inplace=False
-        print('will consider multi level output',self.multi_level)
         # self.conv_0 = nn.Conv2d(
         #         embed_dim, 384, kernel_size=3, stride=1, padding=1)
         # # self.conv_1 = nn.Conv2d(
@@ -191,7 +181,6 @@ class PAPNet_vit(nn.Module):
             _, syncbn_fc_0 = build_norm_layer(self.norm_cfg, embed_dim)
             layers0[task] = nn.Sequential(conv_0,syncbn_fc_0)
 
-        for task in self.tasks:
             conv_1 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
             _, syncbn_fc_1 = build_norm_layer(self.norm_cfg, 256)
             layers1[task] = nn.Sequential(conv_1,syncbn_fc_1)
@@ -204,40 +193,36 @@ class PAPNet_vit(nn.Module):
             _, syncbn_fc_3 = build_norm_layer(self.norm_cfg, 256)
             layers3[task] = nn.Sequential(conv_3,syncbn_fc_3)
 
-            conv_4 = nn.Conv2d(256, p.TASKS.NUM_OUTPUT[task], kernel_size=1, stride=1)
+            conv_4 = nn.Conv2d(256, p.AUXILARY_TASKS.NUM_OUTPUT[task], kernel_size=1, stride=1)
             # _, syncbn_fc_4 = build_norm_layer(self.norm_cfg, 256)
             layers4[task] = nn.Sequential(conv_4)
+
+
         self.layers0 = nn.ModuleDict(layers0)
         self.layers1 = nn.ModuleDict(layers1)
         self.layers2 = nn.ModuleDict(layers2)
         self.layers3 = nn.ModuleDict(layers3)
         self.layers4 = nn.ModuleDict(layers4)
-        
-        
-        if self.multi_level:
-            output_layers1 = {}
-            output_layers2 = {}
-            output_layers3 = {}
-            for task in self.tasks:
-                conv_1 = nn.Conv2d(256, p.TASKS.NUM_OUTPUT[task], kernel_size=1, stride=1)
-                output_layers1[task] = nn.Sequential(conv_1)
 
-                conv_2 = nn.Conv2d(256, p.TASKS.NUM_OUTPUT[task], kernel_size=1, stride=1)
-                output_layers2[task] = nn.Sequential(conv_2)
-
-                conv_3 = nn.Conv2d(256, p.TASKS.NUM_OUTPUT[task], kernel_size=1, stride=1)
-                output_layers3[task] = nn.Sequential(conv_3)
-            self.output_layers1 = nn.ModuleDict(output_layers1)
-            self.output_layers2 = nn.ModuleDict(output_layers2)
-            self.output_layers3 = nn.ModuleDict(output_layers3)
 
         self.align_corners = align_corners
         # Task-specific heads for initial prediction 
         self.initial_task_prediction_heads = InitialTaskPredictionModule(p, self.auxilary_tasks, 384)
         self.affinity_diffusion = AffinityDiffusionModule(self.tasks, self.auxilary_tasks)
+        # Multi-modal distillation
+        # self.multi_modal_distillation = MultiTaskDistillationModule(self.tasks, self.auxilary_tasks, 256)
+
+        # Task-specific heads for final prediction
+        # heads = {}
+        # for task in self.tasks:
+        #     bottleneck1 = Bottleneck(256, 256//4, downsample=None)
+        #     bottleneck2 = Bottleneck(256, 256//4, downsample=None)
+        #     conv_out_ = nn.Conv2d(256, p.AUXILARY_TASKS.NUM_OUTPUT[task], 1)
+        #     heads[task] = nn.Sequential(bottleneck1, bottleneck2, conv_out_)
+
+        # self.heads = nn.ModuleDict(heads)
 
     def forward(self, x):
-        # print('current in train mode',self.training)
         img_size = x.size()[-2:]
         out = {}
         
@@ -260,7 +245,6 @@ class PAPNet_vit(nn.Module):
             feature = F.interpolate(
                 feature, size=(x.shape[-2]*2,x.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
             upscale[task] = feature
-
         # Initial predictions for every task including auxilary tasks
         x = self.initial_task_prediction_heads(upscale)
 
@@ -270,33 +254,22 @@ class PAPNet_vit(nn.Module):
             out['initial_%s' %(task)] = x[task]
 
         x = self.affinity_diffusion(x)
-        # Refine features through multi-modal distillation
-        # x = self.multi_modal_distillation(x)
-        # dict_keys(['semseg', 'depth']) ([8, 256, 120, 160]) torch.Size([8, 256, 120, 160])
-
-        # Make final prediction with task-specific heads
-        # for task in self.tasks:
-        #     out[task] = F.interpolate(self.heads[task](x[task]), img_size, mode='bilinear')
+        
         for task in self.tasks:
             feature = self.layers1[task](x['aggregated_features_%s' %(task)])
-            if self.multi_level and self.training:
-                out['level1_%s'%(task)] = self.output_layers1[task](feature)
             feature = F.relu(feature, inplace=True)
             feature = F.interpolate(
                 feature, size=(feature.shape[-2]*2,feature.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
             
             feature = self.layers2[task](feature)
-            if self.multi_level and self.training:
-                out['level2_%s'%(task)] = self.output_layers2[task](feature)
             feature = F.relu(feature, inplace=True)
             feature = F.interpolate(
                 feature, size=(feature.shape[-2]*2,feature.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
             
             feature = self.layers3[task](feature)
-            if self.multi_level and self.training:
-                out['level3_%s'%(task)] = self.output_layers3[task](feature)
             feature = F.relu(feature, inplace=True)
             feature = self.layers4[task](feature)
+            # feature = F.relu(feature, inplace=True)
             out[task] = F.interpolate(
                 feature, size=(feature.shape[-2]*2,feature.shape[-1]*2), mode='bilinear', align_corners=self.align_corners)
 
