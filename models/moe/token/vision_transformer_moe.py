@@ -23,6 +23,8 @@ from torch.utils.checkpoint import checkpoint
 from .gates import NoisyGate_VMoE as Custom_VMoE
 from models.moe.moe import TaskMoE
 from models.moe.aggregation_stages import AggregationStage
+from models.moe.token.relation_conditioned_attention import TaskConditionedAttention
+from models.moe.token.sharing_loss import SharingRegularizationLoss
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
 
@@ -391,15 +393,30 @@ class TokenBlock(nn.Module):
                  moe_top_k=4, moe_gate_dim=-1, world_size=2,
                  moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=64, multi_gate=False,
                  num_experts_pertask = -1, num_tasks = -1,
-                 gate_input_ahead = False):
+                 gate_input_ahead = False,
+                 use_task_conditioned_attn=False, attn_num_experts=4,
+                 attn_expert_top_k=2, branch_embed_dim=32):
         super().__init__()
         self.moe = moe
         self.moe_top_k = moe_top_k
         self.tot_expert = moe_experts * world_size
         self.num_tasks = num_tasks
+        self.use_task_conditioned_attn = use_task_conditioned_attn
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
+        if use_task_conditioned_attn and num_tasks > 0:
+            self.attn = TaskConditionedAttention(
+                dim=dim, num_heads=num_heads,
+                num_experts_per_head=attn_num_experts,
+                expert_top_k=attn_expert_top_k,
+                num_tasks=num_tasks,
+                branch_embed_dim=branch_embed_dim,
+                qkv_bias=qkv_bias, qk_scale=qk_scale,
+                attn_drop=attn_drop, proj_drop=drop,
+            )
+        else:
+            self.attn = Attention(
+                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
         # NOTE: drop path for stochastic depth, we shall see if
         self.drop_path = DropPath(
             drop_path) if drop_path > 0. else nn.Identity()
@@ -743,17 +760,27 @@ class TokenBlock(nn.Module):
     # ==========================================================================
     # LN1 + Attn + Residual
     # ==========================================================================
-    def attn_stage(self, outs: dict):
+    def attn_stage(self, outs: dict, prev_shared_bits=None):
         """
         Attention stage orchestration:
-        for each task: LN1 -> Attn -> Residual  (checkpointing should live inside self._forward_attn)
+        - If use_task_conditioned_attn: branch-aware attention (§4) with relation-conditioned expert gating
+        - Otherwise: per-task standard attention (LN1 -> Attn -> Residual)
+
         outs: {task_id: [B, N, C]}
+        prev_shared_bits: [B, N] int64 or None (from previous block)
         returns: outs (updated)
         """
-
-        for task in range(self.num_tasks):
-            outs[task] = self._forward_attn(outs[task])
-        return outs
+        if self.use_task_conditioned_attn:
+            # §4: Task-Conditioned Attention
+            normed = {t: self.norm1(outs[t]) for t in range(self.num_tasks)}
+            attn_outs = self.attn(normed, prev_shared_bits)
+            for t in range(self.num_tasks):
+                outs[t] = outs[t] + self.drop_path(attn_outs[t])
+            return outs
+        else:
+            for task in range(self.num_tasks):
+                outs[task] = self._forward_attn(outs[task])
+            return outs
     def _forward_attn(self, x):
         """
         Execute attention part only: LN1 -> Attn -> Residual
@@ -1196,9 +1223,11 @@ class TokenBlock(nn.Module):
         aux = self._init_aux(outs)
 
         # -------------------------
-        # 1) Attention stage (LN1 + Attn + Residual) - per task
+        # 1) Attention stage (LN1 + Attn + Residual)
+        #    - task-conditioned: uses prev_shared_bits for branch-aware attention (§4)
+        #    - standard: per-task independent attention
         # -------------------------
-        outs = self.attn_stage(outs)
+        outs = self.attn_stage(outs, prev_shared_bits=prev_shared_bits)
 
         # -------------------------
         # 2) Shareability score 예측 (모든 블록에서)
@@ -1352,13 +1381,15 @@ class TokenBlock(nn.Module):
 
 class TokenVisionTransformerMoE(nn.Module):
     def __init__(self, model_name='vit_large_patch16_384', img_size=384, patch_size=16, in_chans=3, embed_dim=1024, depth=24,
-                    num_heads=16, num_classes=19, mlp_ratio=4., qkv_bias=True, qk_scale=None,  representation_size=None, distilled=False, 
+                    num_heads=16, num_classes=19, mlp_ratio=4., qkv_bias=True, qk_scale=None,  representation_size=None, distilled=False,
                     drop_rate=0.1, attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=partial(nn.LayerNorm, eps=1e-6), norm_cfg=None,
                     pos_embed_interp=False, random_init=False, align_corners=False,
                     act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=8, moe_top_k=4, world_size=2, gate_dim=-1,
                     moe_gate_type="token_noisy_vmoe", vmoe_noisy_std=1, gate_task_specific_dim=64,multi_gate=False,
                     num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False,
                     share_gamma=0.5, bootstrap_share_gamma=0.3, bootstrap_first_moe=True,
+                    use_task_conditioned_attn=False, attn_num_experts=4,
+                    attn_expert_top_k=2, branch_embed_dim=32, share_reg_lambda=0.01,
                     **kwargs):
         super(TokenVisionTransformerMoE, self).__init__(**kwargs)
         # print(hybrid_backbone is None)
@@ -1417,6 +1448,12 @@ class TokenVisionTransformerMoE(nn.Module):
         self.share_gamma = float(share_gamma)
         self.bootstrap_share_gamma = float(bootstrap_share_gamma)
         self.bootstrap_first_moe = bool(bootstrap_first_moe)
+        self.use_task_conditioned_attn = use_task_conditioned_attn
+        self.attn_num_experts = attn_num_experts
+        self.attn_expert_top_k = attn_expert_top_k
+        self.branch_embed_dim = branch_embed_dim
+        self.share_reg_lambda = share_reg_lambda
+        self.share_reg_loss_fn = SharingRegularizationLoss(lambda_share=share_reg_lambda) if share_reg_lambda > 0 else None
 
         if self.gate_task_specific_dim <= 0:
             raise ValueError("gate_task_specific_dim must be > 0 for TokenVisionTransformerMoE MoE routing.")
@@ -1432,11 +1469,18 @@ class TokenVisionTransformerMoE(nn.Module):
             # self.gamma = nn.Parameter(torch.Tensor([1]), requires_grad=True)
         first_moe_index = None
         for i in range(self.depth):
+            # Common kwargs for task-conditioned attention (§4)
+            tca_kwargs = dict(
+                use_task_conditioned_attn=self.use_task_conditioned_attn,
+                attn_num_experts=self.attn_num_experts,
+                attn_expert_top_k=self.attn_expert_top_k,
+                branch_embed_dim=self.branch_embed_dim,
+            )
             if i % 2 == 0:
                 # Non-MoE block: also needs num_tasks for attn_post_aggr
                 blocks.append(TokenBlock(dim=self.embed_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, qkv_bias=self.qkv_bias, qk_scale=self.qk_scale,
                 drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer,
-                num_tasks=self.num_tasks))
+                num_tasks=self.num_tasks, **tca_kwargs))
             else:
                 if first_moe_index is None:
                     first_moe_index = i
@@ -1447,7 +1491,7 @@ class TokenVisionTransformerMoE(nn.Module):
                               moe_gate_type=moe_gate_type, vmoe_noisy_std=vmoe_noisy_std,
                               gate_task_specific_dim=self.gate_task_specific_dim,multi_gate=self.multi_gate,
                               num_experts_pertask = num_experts_pertask, num_tasks = self.num_tasks,
-                              gate_input_ahead = self.gate_input_ahead))
+                              gate_input_ahead = self.gate_input_ahead, **tca_kwargs))
         self.blocks = nn.Sequential(*blocks)
         self.first_moe_index = first_moe_index
 
@@ -1553,6 +1597,7 @@ class TokenVisionTransformerMoE(nn.Module):
 
         # ---- totals ----
         total_cv_loss = x.new_tensor(0.0)
+        total_share_reg_loss = x.new_tensor(0.0)
         T = self.num_tasks
         stats = {
             "moe_blocks": 0,
@@ -1593,6 +1638,12 @@ class TokenVisionTransformerMoE(nn.Module):
 
             # cv loss
             total_cv_loss = total_cv_loss + aux.get("cv_loss", x.new_tensor(0.0))
+
+            # sharing regularization loss (§6)
+            if self.share_reg_loss_fn is not None and curr_shared_bits is not None:
+                total_share_reg_loss = total_share_reg_loss + self.share_reg_loss_fn(
+                    curr_shared_bits, self.num_tasks
+                )
 
             # stats (count only MoE blocks)
             if getattr(blk, "moe", False):
@@ -1689,7 +1740,7 @@ class TokenVisionTransformerMoE(nn.Module):
             if logger is not None:
                 logger.log_moe_stats(stats)
 
-        return outs, total_cv_loss
+        return outs, total_cv_loss + total_share_reg_loss
 
     def _conv_filter(self, state_dict, patch_size=16):
         """ convert patch embedding weight from manual patchify + linear proj to conv"""
