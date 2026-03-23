@@ -336,6 +336,26 @@ def get_backbone(p, args=None):
         if bootstrap_first_moe is None:
             bootstrap_first_moe = True
 
+        # Task-Conditioned Attention params (§4)
+        use_task_conditioned_attn = bn_args.get("use_task_conditioned_attn",
+            getattr(args, "use_task_conditioned_attn", False))
+        attn_num_experts = bn_args.get("attn_num_experts",
+            getattr(args, "attn_num_experts", 4))
+        attn_expert_top_k = bn_args.get("attn_expert_top_k",
+            getattr(args, "attn_expert_top_k", 2))
+        branch_embed_dim = bn_args.get("branch_embed_dim",
+            getattr(args, "branch_embed_dim", 32))
+        share_reg_lambda = bn_args.get("share_reg_lambda",
+            getattr(args, "share_reg_lambda", 0.01))
+
+        tca_kwargs = dict(
+            use_task_conditioned_attn=use_task_conditioned_attn,
+            attn_num_experts=attn_num_experts,
+            attn_expert_top_k=attn_expert_top_k,
+            branch_embed_dim=branch_embed_dim,
+            share_reg_lambda=share_reg_lambda,
+        )
+
         if args.moe_use_gate:
             gate_model = vits_gate.__dict__[args.moe_gate_arch](num_classes=0)
             backbone = TokenVisionTransformerMoE(model_name=bn_args['model_name'],\
@@ -347,7 +367,8 @@ def get_backbone(p, args=None):
                                     gate_dim=gate_model.num_features,
                                     share_gamma=share_gamma,
                                     bootstrap_share_gamma=bootstrap_share_gamma,
-                                    bootstrap_first_moe=bootstrap_first_moe,)
+                                    bootstrap_first_moe=bootstrap_first_moe,
+                                    **tca_kwargs)
             backbone = VisionTransformerMoCoWithGate(backbone, gate_model)
         else:
             
@@ -363,7 +384,8 @@ def get_backbone(p, args=None):
                                         gate_input_ahead = args.gate_input_ahead,
                                         share_gamma=share_gamma,
                                         bootstrap_share_gamma=bootstrap_share_gamma,
-                                        bootstrap_first_moe=bootstrap_first_moe)
+                                        bootstrap_first_moe=bootstrap_first_moe,
+                                        **tca_kwargs)
         linear_keyword = 'head'
         backbone_channels = 2048
 
