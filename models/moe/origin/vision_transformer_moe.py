@@ -8,84 +8,16 @@ import collections.abc
 import warnings
 from collections import OrderedDict
 from utils.helpers import load_pretrained,load_pretrained_pos_emb
-from models.ckpt_custom_moe_layer import FMoETransformerMLP
+from models.moe.origin.custom_moe_layer import FMoETransformerMLP
 # from .layers import DropPath, to_2tuple, trunc_normal_
-from timm.layers  import lecun_normal_
+from timm.models.layers  import lecun_normal_
 # from ..builder import BACKBONES
 import numpy as np
 from collections import Counter
-from models.gate_funs.noisy_gate import NoisyGate
-from models.gate_funs.ckpt_noisy_gate_vmoe import NoisyGate_VMoE
-from torch.utils.checkpoint import checkpoint
+from models.moe.noisy_gate import NoisyGate
+from models.moe.origin.noisy_gate_vmoe import NoisyGate_VMoE
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
-
-def _gates_to_load(gates):
-    """Compute the true load per expert, given the gates.
-    The load is the number of examples for which the corresponding gate is >0.
-    Args:
-        gates: a `Tensor` of shape [batch_size, n]
-    Returns:
-        a float32 `Tensor` of shape [n]
-    """
-    return (gates > 0).sum(0)
-
-def _prob_in_top_k(clean_values, noisy_values, noise_stddev, noisy_top_values, top_k):
-    """Helper function to NoisyTopKGating.
-    Computes the probability that value is in top k, given different random noise.
-
-    Args:
-        clean_values: a `Tensor` of shape [batch, n].
-        noisy_values: a `Tensor` of shape [batch, n].
-        noise_stddev: a `Tensor` of shape [batch, n], or None
-        noisy_top_values: a `Tensor` of shape [batch, m].
-        top_k: integer, the k in top-k
-    Returns:
-        a `Tensor` of shape [batch, n].
-    """
-    from torch.distributions.normal import Normal
-
-    batch = clean_values.size(0)
-    m = noisy_top_values.size(1)
-    top_values_flat = noisy_top_values.flatten()
-    threshold_positions_if_in = (
-        torch.arange(batch, device=clean_values.device) * m + top_k
-    )
-    threshold_if_in = torch.unsqueeze(
-        torch.gather(top_values_flat, 0, threshold_positions_if_in), 1
-    )
-    is_in = torch.gt(noisy_values, threshold_if_in)
-    threshold_positions_if_out = threshold_positions_if_in - 1
-    threshold_if_out = torch.unsqueeze(
-        torch.gather(top_values_flat, 0, threshold_positions_if_out), 1
-    )
-
-    normal = Normal(
-        torch.tensor([0.0], device=clean_values.device),
-        torch.tensor([1.0], device=clean_values.device),
-    )
-
-    prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)
-    prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
-    prob = torch.where(is_in, prob_if_in, prob_if_out)
-    return prob
-
-def cv_squared(x):
-    """The squared coefficient of variation of a sample.
-    Useful as a loss to encourage a positive distribution to be more uniform.
-    Epsilons added for numerical stability.
-    Returns 0 for an empty Tensor.
-
-    Args:
-        x: a `Tensor`.
-    Returns:
-        a `Scalar`.
-    """
-    eps = 1e-10
-    if x.shape[0] == 1:
-        return torch.Tensor([0])
-    return x.float().var() / (x.float().mean() ** 2 + eps)
-
 def _cfg(url='', **kwargs):
     return {
         'url': url,
@@ -102,21 +34,12 @@ default_cfgs = {
     'vit_tiny_patch16_224': _cfg(
         url = 'https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth',
     ),
-    'deit_tiny_distilled_patch16_224': _cfg(
-        url='https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth',
-    ),
     'vit_small_patch16_224': _cfg(
         url = 'https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth',
         # url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_small_p16_224-15ec54c9.pth',
     ),
-    'deit_small_distilled_patch16_224': _cfg(
-        url='https://dl.fbaipublicfiles.com/deit/deit_small_distilled_patch16_224-649709d9.pth',
-    ),
     'vit_base_patch16_224': _cfg(
         url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_base_p16_224-4e355ebd.pth',
-    ),
-    'deit_base_distilled_patch16_224': _cfg(
-        url='https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_224-df68dfff.pth',
     ),
     'vit_base_patch16_384': _cfg(
         url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_384-83fb41ba.pth',
@@ -144,18 +67,6 @@ default_cfgs = {
         input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0, checkpoint=True,
     ),
 }
-
-_DISTILLED_DEFAULT_CFG_MAP = {
-    "vit_tiny_patch16_224": "deit_tiny_distilled_patch16_224",
-    "vit_small_patch16_224": "deit_small_distilled_patch16_224",
-    "vit_base_patch16_224": "deit_base_distilled_patch16_224",
-}
-
-
-def _resolve_default_cfg_name(model_name, distilled):
-    if distilled:
-        return _DISTILLED_DEFAULT_CFG_MAP.get(model_name, model_name)
-    return model_name
 
 
 def to_2tuple(x):
@@ -312,6 +223,65 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class Block(nn.Module):
+
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
+                 moe=False, moe_mlp_ratio=-1, moe_experts=64,
+                 moe_top_k=2, moe_gate_dim=-1, world_size=1, gate_return_decoupled_activation=False,
+                 moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False, 
+                 regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1,
+                 gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False):
+        super().__init__()
+        self.moe = moe
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        # NOTE: drop path for stochastic depth, we shall see if 
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.gate_input_ahead = gate_input_ahead
+        self.expert_prune = expert_prune
+        if moe:
+            activation = nn.Sequential(
+                act_layer(),
+                nn.Dropout(drop)
+            )
+            if moe_gate_dim < 0:
+                moe_gate_dim = dim
+            if moe_mlp_ratio < 0:
+                moe_mlp_ratio = mlp_ratio
+            moe_hidden_dim = int(dim * moe_mlp_ratio)
+
+            if moe_gate_type == "noisy":
+                moe_gate_fun = NoisyGate
+            elif moe_gate_type == "noisy_vmoe":
+                moe_gate_fun = NoisyGate_VMoE
+            else:
+                raise ValueError("unknow gate type of {}".format(moe_gate_type))
+
+            self.mlp = FMoETransformerMLP(num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
+                                          world_size=world_size, top_k=moe_top_k, activation=activation, gate=moe_gate_fun,
+                                          gate_return_decoupled_activation=gate_return_decoupled_activation, vmoe_noisy_std=vmoe_noisy_std, 
+                                          gate_task_specific_dim=gate_task_specific_dim,multi_gate=multi_gate,
+                                          regu_experts_fromtask = regu_experts_fromtask, num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
+                                          regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,expert_prune=self.expert_prune)
+            self.mlp_drop = nn.Dropout(drop)
+        else:
+            self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+    
+    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
+        if self.gate_input_ahead:
+            gate_inp = x
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        if not self.moe:
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = x + self.drop_path(self.mlp_drop(self.mlp(self.norm2(x), gate_inp, task_id, task_specific_feature, sem)))
+        return x
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
@@ -322,8 +292,7 @@ class PatchEmbed(nn.Module):
         patch_size = to_2tuple(patch_size)
         num_patches = (img_size[1] // patch_size[1]) * \
             (img_size[0] // patch_size[0])
-        # Accept either int or tuple input size.
-        self.img_size = to_2tuple(img_size)
+        self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
 
@@ -340,6 +309,7 @@ class PatchEmbed(nn.Module):
         x = self.proj(x)
         return x
 
+
 class HybridEmbed(nn.Module):
     """ CNN Feature Map Embedding
     Extract feature map from CNN, flatten, project to embedding dim.
@@ -349,7 +319,7 @@ class HybridEmbed(nn.Module):
         super().__init__()
         assert isinstance(backbone, nn.Module)
         img_size = to_2tuple(img_size)
-        self.img_size = to_2tuple(img_size)
+        self.img_size = img_size
         self.backbone = backbone
         if feature_size is None:
             with torch.no_grad():
@@ -376,190 +346,6 @@ class HybridEmbed(nn.Module):
         x = self.proj(x)
         return x
 
-class Block(nn.Module):
-
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 moe=False, moe_mlp_ratio=-1, moe_experts=64,
-                 moe_top_k=2, moe_gate_dim=-1, world_size=1, gate_return_decoupled_activation=False,
-                 moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1, multi_gate=False, 
-                 regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1,
-                 gate_input_ahead = False,regu_sem=False,sem_force=False,regu_subimage=False,expert_prune=False,
-                 use_checkpointing=True):
-        super().__init__()
-        self.moe = moe
-        self.use_checkpointing = use_checkpointing
-        self.last_moe_analysis = None
-        self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        # NOTE: drop path for stochastic depth, we shall see if 
-        self.drop_path = DropPath(
-            drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.gate_input_ahead = gate_input_ahead
-        self.expert_prune = expert_prune
-        self.expert_hidden_dim = None
-        self.dense_hidden_dim = int(dim * mlp_ratio)
-        self.active_vs_dense_flops_ratio = None
-        if moe:
-            self.tot_expert = moe_experts * world_size
-            self.moe_top_k = moe_top_k
-            activation = nn.Sequential(
-                act_layer(),
-                nn.Dropout(drop)
-            )
-            if moe_gate_dim < 0:
-                moe_gate_dim = dim
-            if moe_mlp_ratio < 0:
-                moe_mlp_ratio = mlp_ratio
-            moe_hidden_dim = int(dim * moe_mlp_ratio)
-            self.expert_hidden_dim = int(moe_hidden_dim)
-            self.active_vs_dense_flops_ratio = float(self.moe_top_k * self.expert_hidden_dim) / float(max(self.dense_hidden_dim, 1))
-
-            if moe_gate_type == "noisy":
-                moe_gate_fun = NoisyGate
-            elif moe_gate_type == "noisy_vmoe":
-                moe_gate_fun = NoisyGate_VMoE
-            else:
-                raise ValueError("unknow gate type of {}".format(moe_gate_type))
-
-            self.mlp = FMoETransformerMLP(num_expert=moe_experts, d_model=dim, d_gate=moe_gate_dim, d_hidden=moe_hidden_dim,
-                                          world_size=world_size, top_k=moe_top_k, activation=activation, gate=moe_gate_fun,
-                                          gate_return_decoupled_activation=gate_return_decoupled_activation, vmoe_noisy_std=vmoe_noisy_std, 
-                                          gate_task_specific_dim=gate_task_specific_dim,multi_gate=multi_gate,
-                                          regu_experts_fromtask = regu_experts_fromtask, num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
-                                          regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,expert_prune=self.expert_prune)
-            self.mlp_drop = nn.Dropout(drop)
-        else:
-            self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-    
-    def _ckpt_main_moe(self, x, gate_inp, task_specific_feature, sem, task_id_tensor):
-        """Checkpointed MoE forward: attn + norm2 + mlp, returns summaries for cv_loss"""
-        # attn + norm2
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        normed_x = self.norm2(x)
-
-        task_id_raw = int(task_id_tensor.item())
-        task_id = None if task_id_raw < 0 else task_id_raw
-
-        moe_output, clean_logits, noisy_logits, noise_stddev, top_logits, gates = \
-            self.mlp(normed_x, gate_inp, task_id, task_specific_feature, sem)
-
-        x = x + self.drop_path(self.mlp_drop(moe_output))
-
-        # Compute summaries for cv_loss (gates tensor stays inside checkpoint)
-        importance = gates.sum(0)  # [E]
-
-        # Compute load vector
-        if self.moe_top_k < self.tot_expert and abs(noise_stddev) > 1e-6:
-            load = _prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits, self.moe_top_k).sum(0)
-        else:
-            load = _gates_to_load(gates)
-
-        probs = gates.float()
-        token_entropy = -(probs.clamp_min(1e-12).log() * probs).sum(dim=-1)
-        gate_entropy_sum = token_entropy.sum()
-        top1_prob_sum = probs.max(dim=-1).values.sum()
-        gate_token_count = probs.new_tensor(float(probs.shape[0]))
-        expert_load_hist = (probs > 0).sum(dim=0).to(probs.dtype)
-        moe_out_norm_ratio = moe_output.float().norm(p=2) / (normed_x.float().norm(p=2) + 1e-12)
-        clean_logit_std = clean_logits.float().std(dim=-1, unbiased=False).mean()
-
-        return (
-            x,
-            importance,
-            load,
-            gate_entropy_sum,
-            top1_prob_sum,
-            gate_token_count,
-            expert_load_hist,
-            moe_out_norm_ratio,
-            clean_logit_std,
-        )
-
-    def _ckpt_non_moe(self, x):
-        """Checkpointed non-MoE forward: attn + norm2 + mlp"""
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        normed_x = self.norm2(x)
-        x = x + self.drop_path(self.mlp(normed_x))
-        return x
-
-    def forward(self, x, gate_inp=None, task_id=None, task_specific_feature=None, sem=None):
-        if self.gate_input_ahead:  # False
-            gate_inp = x
-
-        if not self.moe:
-            # non-moe path: fully checkpointed
-            if self.training and self.use_checkpointing:
-                x = checkpoint(self._ckpt_non_moe, x, use_reentrant=False)
-            else:
-                x = self._ckpt_non_moe(x)
-            self.last_moe_analysis = None
-            return x, None
-
-        # MoE path
-        task_id_tensor = (
-            torch.tensor(task_id, device=x.device)
-            if task_id is not None
-            else torch.tensor(-1, device=x.device)
-        )
-
-        if self.training and self.use_checkpointing:
-            (
-                x,
-                importance,
-                load,
-                gate_entropy_sum,
-                top1_prob_sum,
-                gate_token_count,
-                expert_load_hist,
-                moe_out_norm_ratio,
-                clean_logit_std,
-            ) = checkpoint(
-                self._ckpt_main_moe,
-                x, gate_inp, task_specific_feature, sem, task_id_tensor,
-                use_reentrant=False
-            )
-        else:
-            (
-                x,
-                importance,
-                load,
-                gate_entropy_sum,
-                top1_prob_sum,
-                gate_token_count,
-                expert_load_hist,
-                moe_out_norm_ratio,
-                clean_logit_std,
-            ) = self._ckpt_main_moe(x, gate_inp, task_specific_feature, sem, task_id_tensor)
-
-        # CV loss calculation outside checkpoint
-        if self.training:
-            cv_loss = cv_squared(importance) + cv_squared(load)
-        else:
-            cv_loss = 0
-
-        load_f = load.float()
-        if load_f.numel() <= 1:
-            expert_load_cv = 0.0
-        else:
-            expert_load_cv = float((load_f.var(unbiased=False) / (load_f.mean().pow(2) + 1e-10)).item())
-
-        self.last_moe_analysis = {
-            "gate_entropy_sum": float(gate_entropy_sum.item()),
-            "top1_prob_sum": float(top1_prob_sum.item()),
-            "gate_token_count": int(gate_token_count.item()),
-            "expert_load_hist": [int(v) for v in expert_load_hist.tolist()],
-            "expert_load_cv": expert_load_cv,
-            "clean_logit_std": float(clean_logit_std.item()),
-            "moe_out_norm_ratio": float(moe_out_norm_ratio.item()),
-            "expert_hidden_dim": int(self.expert_hidden_dim) if self.expert_hidden_dim is not None else 0,
-            "active_vs_dense_flops_ratio": float(self.active_vs_dense_flops_ratio) if self.active_vs_dense_flops_ratio is not None else 0.0,
-        }
-
-        return x, cv_loss
 
 class VisionTransformerMoE(nn.Module):
     def __init__(self, model_name='vit_large_patch16_384', img_size=384, patch_size=16, in_chans=3, embed_dim=1024, depth=24,
@@ -569,11 +355,11 @@ class VisionTransformerMoE(nn.Module):
                     act_layer=None, weight_init='', moe_mlp_ratio=-1, moe_experts=64, moe_top_k=2, world_size=1, gate_dim=-1,
                     gate_return_decoupled_activation=False, moe_gate_type="noisy", vmoe_noisy_std=1, gate_task_specific_dim=-1,multi_gate=False,
                     regu_experts_fromtask = False, num_experts_pertask = -1, num_tasks = -1, gate_input_ahead=False, regu_sem=False, sem_force=False, regu_subimage=False, 
-                    expert_prune=False, use_checkpointing=True, **kwargs):
+                    expert_prune=False, **kwargs):
         super(VisionTransformerMoE, self).__init__(**kwargs)
         # print(hybrid_backbone is None)
         self.model_name = model_name
-        self.img_size = to_2tuple(img_size)
+        self.img_size = img_size
         self.patch_size = patch_size
         self.in_chans = in_chans
         self.num_features = self.embed_dim = embed_dim
@@ -592,29 +378,25 @@ class VisionTransformerMoE(nn.Module):
         self.pos_embed_interp = pos_embed_interp
         self.random_init = random_init
         self.align_corners = align_corners
-        self.h = int(self.img_size[0] / self.patch_size)
-        self.w = int(self.img_size[1] / self.patch_size)
+        self.h = int(self.img_size[0]/self.patch_size)
+        self.w = int(self.img_size[1]/self.patch_size)
 
         self.num_stages = self.depth
-        # Only keep the last stage output to save memory (decoder only uses the last one)
-        self.out_indices = (self.num_stages - 1,)
+        self.out_indices = tuple(range(self.num_stages))
 
         self.num_token = 2 if distilled else 1
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
         self.norm_layer = norm_layer
         self.moe_experts = moe_experts
-        self.moe_mlp_ratio = moe_mlp_ratio
         self.moe_top_k = moe_top_k
         self.gate_return_decoupled_activation = gate_return_decoupled_activation
         self.multi_gate = multi_gate
         self.regu_sem = regu_sem
         self.sem_force = sem_force
-        self.use_checkpointing = bool(use_checkpointing)
         # print(self.hybrid_backbone is None)
         self.expert_prune = expert_prune
         print('set expert prune as ',self.expert_prune)
-        print("gradient checkpointing:", self.use_checkpointing)
         if self.hybrid_backbone is not None:
             self.patch_embed = HybridEmbed(
                 self.hybrid_backbone, img_size=self.img_size, in_chans=self.in_chans, embed_dim=self.embed_dim)
@@ -626,7 +408,7 @@ class VisionTransformerMoE(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if distilled else None
         self.pos_embed = nn.Parameter(torch.zeros(
-            1, self.num_patches + self.num_token, self.embed_dim))
+            1, self.num_patches + 1, self.embed_dim))
         self.pos_drop = nn.Dropout(p=self.drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate,
@@ -643,8 +425,7 @@ class VisionTransformerMoE(nn.Module):
         for i in range(self.depth):
             if i % 2 == 0:
                 blocks.append(Block(dim=self.embed_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, qkv_bias=self.qkv_bias, qk_scale=self.qk_scale,
-                drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer,
-                use_checkpointing=self.use_checkpointing))
+                drop=self.drop_rate, attn_drop=self.attn_drop_rate, drop_path=dpr[i], norm_layer=self.norm_layer))
             else:
                 blocks.append(Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                               drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
@@ -653,8 +434,7 @@ class VisionTransformerMoE(nn.Module):
                               moe_gate_type=moe_gate_type, vmoe_noisy_std=vmoe_noisy_std, 
                               gate_task_specific_dim=self.gate_task_specific_dim,multi_gate=self.multi_gate,
                               regu_experts_fromtask = regu_experts_fromtask, num_experts_pertask = num_experts_pertask, num_tasks = num_tasks,
-                              gate_input_ahead = self.gate_input_ahead,regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,
-                              expert_prune=self.expert_prune, use_checkpointing=self.use_checkpointing))
+                              gate_input_ahead = self.gate_input_ahead,regu_sem=regu_sem,sem_force=sem_force,regu_subimage=regu_subimage,expert_prune=self.expert_prune))
         self.blocks = nn.Sequential(*blocks)
         # NOTE as per official impl, we could have a pre-logits representation dense layer + tanh here
         # self.repr = nn.Linear(embed_dim, representation_size)
@@ -688,12 +468,6 @@ class VisionTransformerMoE(nn.Module):
 
         self.init_weights()
         self.idx = 0
-        self.latest_moe_stats = None
-        try:
-            from utils.wandb_logger import get_wandb_logger
-            self.wandb_logger = get_wandb_logger
-        except:
-            self.wandb_logger = None
     def init_weights(self, pretrained=None):
         for n, m in self.named_modules():
             if isinstance(m, nn.Linear):
@@ -703,25 +477,11 @@ class VisionTransformerMoE(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
+        self.default_cfg = default_cfgs[self.model_name]
+        load_pretrained_pos_emb(self, num_classes=self.num_classes, in_chans=self.in_chans, pos_embed_interp=self.pos_embed_interp,
+        num_patches=self.patch_embed.num_patches, align_corners=self.align_corners, img_h=self.h, img_w=self.w)
         if not self.random_init:
-            cfg_name = _resolve_default_cfg_name(
-                self.model_name, self.dist_token is not None
-            )
-            self.default_cfg = default_cfgs.get(cfg_name, default_cfgs[self.model_name])
-            print(
-                f"[INIT] using pretrained cfg '{cfg_name}' for model '{self.model_name}' "
-                f"(distilled={self.dist_token is not None})"
-            )
-            load_pretrained_pos_emb(
-                self,
-                num_classes=self.num_classes,
-                in_chans=self.in_chans,
-                pos_embed_interp=self.pos_embed_interp,
-                num_patches=self.patch_embed.num_patches,
-                align_corners=self.align_corners,
-                img_h=self.h,
-                img_w=self.w,
-            )
+            self.default_cfg = default_cfgs[self.model_name]
             if self.model_name in ['vit_small_patch16_224', 'vit_base_patch16_224']:
                 load_pretrained(self, num_classes=self.num_classes, in_chans=self.in_chans, pos_embed_interp=self.pos_embed_interp,
                                 num_patches=self.patch_embed.num_patches, align_corners=self.align_corners, filter_fn=self._conv_filter, img_h=self.h, img_w=self.w)
@@ -734,10 +494,7 @@ class VisionTransformerMoE(nn.Module):
 
     @property
     def no_weight_decay(self):
-        no_wd = {'pos_embed', 'cls_token'}
-        if self.dist_token is not None:
-            no_wd.add('dist_token')
-        return no_wd
+        return {'pos_embed', 'cls_token'}
 
     def _conv_filter(self, state_dict, patch_size=16):
         """ convert patch embedding weight from manual patchify + linear proj to conv"""
@@ -774,7 +531,7 @@ class VisionTransformerMoE(nn.Module):
                             idx = idx+1
         filename = 'gt_patch_{}.npy'.format(self.idx)
         self.idx=self.idx+1
-        # np.save(filename, hint)
+        np.save(filename, hint)
         return torch.tensor(hint, device=sem.device) 
 
     def forward_features(self, x, gate_inp, task_id,sem):
@@ -782,11 +539,7 @@ class VisionTransformerMoE(nn.Module):
         x = self.patch_embed(x)
         x = x.flatten(2).transpose(1, 2)
         cls_tokens = self.cls_token.expand(B, -1, -1)
-        if self.dist_token is not None:
-            dist_tokens = self.dist_token.expand(B, -1, -1)
-            x = torch.cat((cls_tokens, dist_tokens, x), dim=1)
-        else:
-            x = torch.cat((cls_tokens, x), dim=1)
+        x = torch.cat((cls_tokens, x), dim=1)
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
@@ -795,95 +548,19 @@ class VisionTransformerMoE(nn.Module):
             task_specific = torch.zeros(self.num_tasks,device=x.device)
             task_specific[task_id]=1.0
             task_specific_feature = self.gate_task_represent(task_specific)
-        out = None
-        total_cv_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype, requires_grad=True)
-        stats = {"moe_blocks": 0, "total_positions": 0}
-        analysis = {
-            "gate_entropy_sum": 0.0,
-            "top1_prob_sum": 0.0,
-            "gate_token_count": 0,
-            "expert_load_cv_sum": 0.0,
-            "clean_logit_std_sum": 0.0,
-            "moe_out_norm_ratio_sum": 0.0,
-            "expert_hidden_dim_sum": 0.0,
-            "active_vs_dense_flops_ratio_sum": 0.0,
-            "analysis_block_count": 0,
-            "expert_load_hist": None,
-        }
-
+        
         for i, blk in enumerate(self.blocks):
             if blk.moe:
-                x, cv_loss = blk(x, gate_inp, task_id, task_specific_feature, sem=sem)
-                if cv_loss is not None:
-                    total_cv_loss = total_cv_loss + cv_loss
-                stats["moe_blocks"] += 1
-                stats["total_positions"] += int(B * max(x.shape[1] - 1, 0))
-
-                block_analysis = getattr(blk, "last_moe_analysis", None)
-                if isinstance(block_analysis, dict):
-                    analysis["gate_entropy_sum"] += float(block_analysis.get("gate_entropy_sum", 0.0))
-                    analysis["top1_prob_sum"] += float(block_analysis.get("top1_prob_sum", 0.0))
-                    analysis["gate_token_count"] += int(block_analysis.get("gate_token_count", 0))
-                    analysis["expert_load_cv_sum"] += float(block_analysis.get("expert_load_cv", 0.0))
-                    analysis["clean_logit_std_sum"] += float(block_analysis.get("clean_logit_std", 0.0))
-                    analysis["moe_out_norm_ratio_sum"] += float(block_analysis.get("moe_out_norm_ratio", 0.0))
-                    analysis["expert_hidden_dim_sum"] += float(block_analysis.get("expert_hidden_dim", 0.0))
-                    analysis["active_vs_dense_flops_ratio_sum"] += float(block_analysis.get("active_vs_dense_flops_ratio", 0.0))
-                    analysis["analysis_block_count"] += 1
-
-                    block_hist = block_analysis.get("expert_load_hist", None)
-                    if block_hist is not None:
-                        if analysis["expert_load_hist"] is None:
-                            analysis["expert_load_hist"] = [0] * len(block_hist)
-                        if len(analysis["expert_load_hist"]) == len(block_hist):
-                            for j in range(len(block_hist)):
-                                analysis["expert_load_hist"][j] += int(block_hist[j])
+                x=blk(x, gate_inp, task_id, task_specific_feature,sem=sem)
             else:
-                x, _ = blk(x)
-
-            if i in self.out_indices:
-                out = x
-
-        gate_token_count = analysis["gate_token_count"]
-        if gate_token_count > 0:
-            gate_entropy = analysis["gate_entropy_sum"] / float(gate_token_count)
-            top1_prob_mean = analysis["top1_prob_sum"] / float(gate_token_count)
-        else:
-            gate_entropy = 0.0
-            top1_prob_mean = 0.0
-
-        block_count = max(analysis["analysis_block_count"], 1)
-        expert_load_hist = analysis["expert_load_hist"] if analysis["expert_load_hist"] is not None else []
-        if len(expert_load_hist) > 0:
-            dead_expert_ratio = float(sum(1 for v in expert_load_hist if v == 0)) / float(len(expert_load_hist))
-        else:
-            dead_expert_ratio = 0.0
-
-        stats["analysis"] = {
-            "gate_entropy": gate_entropy,
-            "top1_prob_mean": top1_prob_mean,
-            "expert_load_hist": expert_load_hist,
-            "dead_expert_ratio": dead_expert_ratio,
-            "expert_load_cv": analysis["expert_load_cv_sum"] / float(block_count),
-            "clean_logit_std": analysis["clean_logit_std_sum"] / float(block_count),
-            "moe_out_norm_ratio": analysis["moe_out_norm_ratio_sum"] / float(block_count),
-            "expert_hidden_dim": analysis["expert_hidden_dim_sum"] / float(block_count),
-            "active_vs_dense_flops_ratio": analysis["active_vs_dense_flops_ratio_sum"] / float(block_count),
-        }
-
-        self.latest_moe_stats = stats
-        if self.training and stats["moe_blocks"] > 0 and self.wandb_logger is not None:
-            logger = self.wandb_logger()
-            if logger is not None:
-                logger.log_moe_stats(stats)
-
-        return out, total_cv_loss
+                x = blk(x)
+        return x
 
     def forward(self, x, gate_inp=None, task_id=None,sem=None):
         if sem is not None and (self.regu_sem or self.sem_force):
             sem = self.get_groundtruth_sem(sem)
-        out, cv_losses = self.forward_features(x, gate_inp, task_id=task_id, sem=sem)
-        return out, cv_losses
+        out = self.forward_features(x, gate_inp, task_id = task_id,sem=sem)
+        return out
 
 
 def _init_vit_weights(m, n: str = '', head_bias: float = 0., jax_impl: bool = False):

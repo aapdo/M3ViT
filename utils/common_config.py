@@ -19,8 +19,8 @@ from .sampler import (
     DistributedSampler,
     GroupSampler,
 )
-from models import vits_gate
-from models.vits_gate import VisionTransformerMoCoWithGate
+from models.backbones import vits_gate
+from models.backbones.vits_gate import VisionTransformerMoCoWithGate
 from utils.moe_utils import (
     read_specific_group_experts,
     validate_single_file_moe_checkpoint_or_raise,
@@ -126,17 +126,17 @@ def get_backbone(p, args=None):
     set_upcycling_runtime_options(None)
 
     if p['backbone'] == 'resnet18':
-        from models.resnet import resnet18
+        from models.backbones.resnet import resnet18
         backbone = resnet18(p['backbone_kwargs']['pretrained'])
         backbone_channels = 512
     
     elif p['backbone'] == 'resnet50':
-        from models.resnet import resnet50
+        from models.backbones.resnet import resnet50
         backbone = resnet50(p['backbone_kwargs']['pretrained'])
         backbone_channels = 2048
     
     elif p['backbone'] == 'mobilenetv3':
-        from models.mobilenetv3 import mobilenetv3_large, mobilenetv3_small
+        from models.backbones.mobilenetv3 import mobilenetv3_large, mobilenetv3_small
         backbone = mobilenetv3_large()
         state_dict =torch.load(args.pretrained)
         msg = backbone.load_state_dict(state_dict, strict=False)
@@ -145,12 +145,12 @@ def get_backbone(p, args=None):
         backbone_channels = 960
 
     elif p['backbone'] == 'hrnet_w18':
-        from models.seg_hrnet import hrnet_w18
+        from models.backbones.seg_hrnet import hrnet_w18
         backbone = hrnet_w18(p['backbone_kwargs']['pretrained'])
         backbone_channels = [18, 36, 72, 144]
     
     elif p['backbone'] == 'mixture_inner_resnet_50':
-        from models.resnet import mixture_inner_resnet_50
+        from models.backbones.resnet import mixture_inner_resnet_50
         backbone = mixture_inner_resnet_50(pretrained='',tasks=p.TASKS.NAMES,\
         input_dim=1000,init="uniform,-0.5,1",scale_type='relu',num_classes=1000,\
         dataset="imagenet",drop_ratio=0,drop_input=0,)
@@ -158,7 +158,7 @@ def get_backbone(p, args=None):
         backbone_channels = 2048
     
     elif p['backbone'] == 'VisionTransformer':
-        from models.vit import VisionTransformer
+        from models.backbones.vit import VisionTransformer
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         bn_args = p['backbone_kwargs']
         backbone = VisionTransformer(model_name=bn_args['model_name'],\
@@ -171,9 +171,9 @@ def get_backbone(p, args=None):
     
     elif p['backbone'] == 'VisionTransformer_moe':
         if args.use_checkpointing:
-            from models.ckpt_vision_transformer_moe import VisionTransformerMoE
+            from models.moe.ckpt.vision_transformer_moe import VisionTransformerMoE
         else:
-            from models.origin_vision_transformer_moe import VisionTransformerMoE
+            from models.moe.origin.vision_transformer_moe import VisionTransformerMoE
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         bn_args = p['backbone_kwargs']
         if args.moe_data_distributed:
@@ -298,7 +298,7 @@ def get_backbone(p, args=None):
                 raise ValueError("=> no checkpoint found at '{}'".format(args.pretrained))
 
     elif p['backbone'] == 'Token_VisionTransformer_moe':
-        from models.token_vision_transformer_moe import TokenVisionTransformerMoE
+        from models.moe.token.vision_transformer_moe import TokenVisionTransformerMoE
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         bn_args = p['backbone_kwargs']
         if args.moe_data_distributed:
@@ -374,11 +374,11 @@ def get_backbone(p, args=None):
 
     if p['backbone_kwargs']['dilated']: # Add dilated convolutions
         assert(p['backbone'] in ['resnet18', 'resnet50'])
-        from models.resnet_dilated import ResnetDilated
+        from models.backbones.resnet_dilated import ResnetDilated
         backbone = ResnetDilated(backbone)
 
     if 'fuse_hrnet' in p['backbone_kwargs'] and p['backbone_kwargs']['fuse_hrnet']: # Fuse the multi-scale HRNet features
-        from models.seg_hrnet import HighResolutionFuse
+        from models.backbones.seg_hrnet import HighResolutionFuse
         backbone = torch.nn.Sequential(backbone, HighResolutionFuse(backbone_channels, 256))
         backbone_channels = sum(backbone_channels)
 
@@ -387,7 +387,7 @@ def get_backbone(p, args=None):
 
 def get_priormodel(p):
     if p['prior_arch']=='shallow_embedding_imagenet':
-        from models.resnet import shallow_embedding_imagenet
+        from models.backbones.resnet import shallow_embedding_imagenet
         prior_model = shallow_embedding_imagenet(pretrained='', num_classes=1000)
     else:
         raise NotImplementedError
@@ -396,15 +396,15 @@ def get_head(p, backbone_channels, task):
     """ Return the decoder head """
 
     if p['head'] == 'deeplab':
-        from models.aspp import DeepLabHead
+        from models.heads.aspp import DeepLabHead
         head = DeepLabHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
 
     elif p['head'] == 'hrnet':
-        from models.seg_hrnet import HighResolutionHead
+        from models.backbones.seg_hrnet import HighResolutionHead
         head = HighResolutionHead(backbone_channels, p.TASKS.NUM_OUTPUT[task])
 
     elif p['head'] == 'VisionTransformerUpHead':
-        from models.vit_up_head import VisionTransformerUpHead
+        from models.heads.vit_up_head import VisionTransformerUpHead
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         hd_args = p['head_kwargs']
         head = VisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
@@ -414,7 +414,7 @@ def get_head(p, backbone_channels, task):
                     in_channels=hd_args['in_channels'],channels=hd_args['channels'],num_classes=p.TASKS.NUM_OUTPUT[task],\
                         align_corners=hd_args['align_corners'],)
     elif p['head'] == 'TokenVisionTransformerUpHead':
-        from models.token_vit_up_head import TokenVisionTransformerUpHead
+        from models.moe.token.vit_up_head import TokenVisionTransformerUpHead
         norm_cfg = dict(type='SyncBN', requires_grad=True)
         hd_args = p['head_kwargs']
         head = TokenVisionTransformerUpHead(img_size=hd_args['img_size'], patch_size=hd_args['patch_size'],embed_dim=hd_args['embed_dim'],\
@@ -461,7 +461,7 @@ def get_model(p,args=None):
 
         elif p['model'] == 'cross_stitch':
             from models.models import SingleTaskModel
-            from models.cross_stitch import CrossStitchNetwork
+            from models.mtl_methods.cross_stitch import CrossStitchNetwork
             
             # Load single-task models
             backbone_dict, decoder_dict = {}, {}
@@ -479,7 +479,7 @@ def get_model(p,args=None):
 
         elif p['model'] == 'nddr_cnn':
             from models.models import SingleTaskModel
-            from models.nddr_cnn import NDDRCNN
+            from models.mtl_methods.nddr_cnn import NDDRCNN
             
             # Load single-task models
             backbone_dict, decoder_dict = {}, {}
@@ -496,35 +496,35 @@ def get_model(p,args=None):
 
 
         elif p['model'] == 'mtan':
-            from models.mtan import MTAN
+            from models.mtl_methods.mtan import MTAN
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
             model = MTAN(p, backbone, heads, **p['model_kwargs']['mtan_kwargs'])
 
 
         elif p['model'] == 'pad_net':
-            from models.padnet import PADNet
+            from models.mtl_methods.padnet import PADNet
             model = PADNet(p, backbone, backbone_channels)
         
 
         elif p['model'] == 'mti_net':
-            from models.mti_net import MTINet
+            from models.mtl_methods.mti_net import MTINet
             heads = torch.nn.ModuleDict({task: get_head(p, backbone_channels, task) for task in p.TASKS.NAMES})
             model = MTINet(p, backbone, backbone_channels, heads)
 
         elif p['model'] == 'padnet_vit':
-            from models.padnet import PADNet_vit
+            from models.mtl_methods.padnet import PADNet_vit
             norm_cfg = dict(type='SyncBN', requires_grad=True)
             hd_args = p['head_kwargs']
             model = PADNet_vit(p, backbone, embed_dim=hd_args['embed_dim'],img_size=hd_args['img_size'], patch_size=hd_args['patch_size'], align_corners=hd_args['align_corners'],norm_cfg = norm_cfg,)
 
         elif p['model'] == 'papnet_vit':
-            from models.papnet import PAPNet_vit
+            from models.mtl_methods.papnet import PAPNet_vit
             norm_cfg = dict(type='SyncBN', requires_grad=True)
             hd_args = p['head_kwargs']
             model = PAPNet_vit(p, backbone, embed_dim=hd_args['embed_dim'],img_size=hd_args['img_size'], patch_size=hd_args['patch_size'], align_corners=hd_args['align_corners'],norm_cfg = norm_cfg,)
 
         elif p['model'] == 'jtrl':
-            from models.Jtrl import JTRL
+            from models.mtl_methods.Jtrl import JTRL
             norm_cfg = dict(type='SyncBN', requires_grad=True)
             hd_args = p['head_kwargs']
             tam = p['model_kwargs']['tam']

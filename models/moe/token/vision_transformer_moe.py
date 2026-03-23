@@ -9,20 +9,20 @@ import collections.abc
 import warnings
 from collections import OrderedDict, deque
 from utils.helpers import load_pretrained,load_pretrained_pos_emb
-from models.token_custom_moe_layer import TokenFMoETransformerMLP
+from models.moe.token.custom_moe_layer import TokenFMoETransformerMLP
 # from .layers import DropPath, to_2tuple, trunc_normal_
 from timm.layers  import lecun_normal_
 # from ..builder import BACKBONES
 import numpy as np
 from collections import Counter
-from models.gate_funs.noisy_gate import NoisyGate
-from models.gate_funs.ckpt_noisy_gate_vmoe import NoisyGate_VMoE
-from models.gate_funs.token_noisy_gate_vmoe import TokenNoisyGate_VMoE
+from models.moe.noisy_gate import NoisyGate
+from models.moe.ckpt.noisy_gate_vmoe import NoisyGate_VMoE
+from models.moe.token.noisy_gate_vmoe import TokenNoisyGate_VMoE
 from torch.utils.checkpoint import checkpoint
 
 from .gates import NoisyGate_VMoE as Custom_VMoE
-from models.moe import TaskMoE
-from models.aggregation_stages import AggregationStage
+from models.moe.moe import TaskMoE
+from models.moe.aggregation_stages import AggregationStage
 
 a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
 

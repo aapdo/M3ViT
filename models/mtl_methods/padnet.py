@@ -9,7 +9,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.resnet import Bottleneck
+from models.backbones.resnet import Bottleneck
 from models.layers import SEBlock, SABlock
 from mmcv.cnn import build_norm_layer
 from functools import partial

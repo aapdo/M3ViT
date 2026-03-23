@@ -9,9 +9,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.resnet import BasicBlock
+from models.backbones.resnet import BasicBlock
 from models.layers import SEBlock
-from models.padnet import MultiTaskDistillationModule
+from models.mtl_methods.padnet import MultiTaskDistillationModule
 
 
 class InitialTaskPredictionModule(nn.Module):

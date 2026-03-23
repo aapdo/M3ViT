@@ -15,8 +15,8 @@ from fmoe.functions import MOEScatter, MOEGather
 from fmoe.functions import AllGather, Slice
 from fmoe.gates import NaiveGate
 
-from models.gate_funs.noisy_gate import NoisyGate
-from models.gate_funs.ckpt_noisy_gate_vmoe import NoisyGate_VMoE
+from models.moe.noisy_gate import NoisyGate
+from models.moe.ckpt.noisy_gate_vmoe import NoisyGate_VMoE
 
 from pdb import set_trace
 import numpy as np

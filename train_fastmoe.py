@@ -9,8 +9,8 @@ import numpy as np
 import sys
 import torch
 from torch.nn.parallel import DistributedDataParallel
-from models import ckpt_custom_moe_layer, ckpt_vision_transformer_moe
-from models.gate_funs import ckpt_noisy_gate_vmoe
+from models.moe.ckpt import custom_moe_layer as ckpt_custom_moe_layer, vision_transformer_moe as ckpt_vision_transformer_moe
+from models.moe.ckpt import noisy_gate_vmoe as ckpt_noisy_gate_vmoe
 from utils.config import create_config
 from utils.common_config import get_train_dataset, get_transformations,\
                                 get_val_dataset, get_train_dataloader, get_val_dataloader,\
@@ -334,17 +334,22 @@ def main():
 
     # Monkey patch to log all class initializations
     try:
-        from models import vit_up_head, token_custom_moe_layer, token_vision_transformer_moe, token_vit_up_head, models as models_module
-        from models.gate_funs import noisy_gate, token_noisy_gate_vmoe
+        from models.heads import vit_up_head
+        from models.moe.token import custom_moe_layer as token_custom_moe_layer
+        from models.moe.token import vision_transformer_moe as token_vision_transformer_moe
+        from models.moe.token import vit_up_head as token_vit_up_head
+        from models import models as models_module
+        from models.moe import noisy_gate
+        from models.moe.token import noisy_gate_vmoe as token_noisy_gate_vmoe
 
         if args.use_checkpointing:
             vit_moe_module = ckpt_vision_transformer_moe
             moe_layer_module = ckpt_custom_moe_layer
             gate_vmoe_module = ckpt_noisy_gate_vmoe
         else:
-            from models import origin_vision_transformer_moe
-            from models import origin_custom_moe_layer
-            from models.gate_funs import origin_noisy_gate_vmoe
+            from models.moe.origin import vision_transformer_moe as origin_vision_transformer_moe
+            from models.moe.origin import custom_moe_layer as origin_custom_moe_layer
+            from models.moe.origin import noisy_gate_vmoe as origin_noisy_gate_vmoe
             vit_moe_module = origin_vision_transformer_moe
             moe_layer_module = origin_custom_moe_layer
             gate_vmoe_module = origin_noisy_gate_vmoe

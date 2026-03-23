@@ -9,8 +9,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.resnet import ResNet, conv1x1, Bottleneck
-from models.resnet_dilated import ResnetDilated
+from models.backbones.resnet import ResNet, conv1x1, Bottleneck
+from models.backbones.resnet_dilated import ResnetDilated
 import time
 
 class AttentionLayer(nn.Sequential):

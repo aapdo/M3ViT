@@ -8,7 +8,7 @@ from torch.hub import load_state_dict_from_url
 
 from timm.layers import trunc_normal_
 
-from models.ckpt_vision_transformer_moe import VisionTransformerMoE
+from models.moe.ckpt.vision_transformer_moe import VisionTransformerMoE
 
 
 @dataclass
