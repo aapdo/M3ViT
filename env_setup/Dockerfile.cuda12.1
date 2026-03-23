@@ -1,11 +1,15 @@
 # NGC PyTorch Docker image with custom requirements
 # Build with: 
 # docker build -t m3vit_leg:260102 -f env_setup/Dockerfile.cuda12.1 .
-# Start with: 
+# Start with:
 # docker run --gpus all --shm-size="120g" -d --name m3vit_leg \
+#     -p 2222:22 \
 #     -v /home/jy/m3vit:/home/jy/m3vit \
 #     -v /data/multi_task_datasets:/home/jy/multi_task_datasets \
-#     m3vit_leg:260102 sleep infinity
+#     m3vit_leg:260102
+#
+# SSH into container:
+#     ssh -p 2222 jy@localhost
 
 FROM nvcr.io/nvidia/pytorch:24.01-py3
 
@@ -36,9 +40,10 @@ RUN apt-get remove -y python3-opencv || true \
     && rm -rf /usr/lib/python3.10/site-packages/cv2*
 
 
-# Install system packages needed for cv2 + GUI deps
+# Install system packages needed for cv2 + GUI deps + SSH
 RUN apt-get install -y \
     vim sudo tmux \
+    openssh-server \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -46,9 +51,17 @@ RUN apt-get install -y \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create user and group 'jy' with fixed UID/GID 1001
-RUN groupadd -g 1001 jy \
-    && useradd -m -s /bin/bash -u 1001 -g 1001 jy \
+# SSH server configuration
+RUN mkdir -p /var/run/sshd \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
+
+EXPOSE 22
+
+# Create user and group 'jy' with fixed UID/GID 1003
+RUN groupadd -g 1003 jy \
+    && useradd -m -s /bin/bash -u 1003 -g 1003 jy \
     && echo "jy ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 WORKDIR /home/jy
 
@@ -66,5 +79,5 @@ RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
 USER jy
 
-# ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["/bin/bash"]
+# Start sshd in background, then keep container alive
+CMD sudo /usr/sbin/sshd && sleep infinity
