@@ -1,3 +1,7 @@
+# Run scripts (local only)
+run.txt
+nohup_*.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

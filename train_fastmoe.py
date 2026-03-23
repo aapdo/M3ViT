@@ -588,6 +588,7 @@ def main():
             torch.distributed.barrier()
 
     for epoch in range(start_epoch, p['epochs']):
+        epoch_start_time = time.time()
         print(colored('Epoch %d/%d' %(epoch+1, p['epochs']), 'yellow'))
         print(colored('-'*10, 'yellow'))
 
@@ -662,6 +663,14 @@ def main():
                 }, improves, p, moe_save=moe_save)
         if args.distributed:
             torch.distributed.barrier()
+
+        epoch_elapsed = time.time() - epoch_start_time
+        epoch_min, epoch_sec = divmod(epoch_elapsed, 60)
+        remaining = epoch_elapsed * (p['epochs'] - epoch - 1)
+        rem_hr, rem_min = divmod(remaining, 3600)
+        rem_min = rem_min // 60
+        print(colored(f'Epoch {epoch+1}/{p["epochs"]} done in {int(epoch_min)}m {int(epoch_sec)}s | '
+                      f'ETA: {int(rem_hr)}h {int(rem_min)}m', 'green'))
 
     torch.cuda.empty_cache()
 

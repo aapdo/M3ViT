@@ -256,6 +256,16 @@ def get_backbone(p, args=None):
                 else:
                     raise ValueError("Model {} do not exist".format(args.pretrained))
 
+                # Normalize checkpoint key: support both 'state_dict' and 'model'
+                if 'state_dict' not in checkpoint and 'model' in checkpoint:
+                    checkpoint['state_dict'] = checkpoint['model']
+
+                # Strip 'encoder.' prefix from pretrain checkpoint keys
+                sd = checkpoint['state_dict']
+                for k in list(sd.keys()):
+                    if k.startswith('encoder.'):
+                        sd[k[len('encoder.'):]] = sd.pop(k)
+
                 if "mae" in args.pretrained and "model" in checkpoint:
                     state_dict = checkpoint["model"]
                     args.start_epoch = 0
@@ -637,7 +647,7 @@ def get_train_dataset(p, transforms):
 
     elif db_name == 'NYUD':
         from data.nyud import NYUD_MT
-        database = NYUD_MT(split='train', transform=transforms,download=False, do_edge='edge' in p.ALL_TASKS.NAMES, 
+        database = NYUD_MT(split='train', transform=transforms,download=True, do_edge='edge' in p.ALL_TASKS.NAMES, 
                                     do_semseg='semseg' in p.ALL_TASKS.NAMES, 
                                     do_normals='normals' in p.ALL_TASKS.NAMES, 
                                     do_depth='depth' in p.ALL_TASKS.NAMES, overfit=p['overfit'])
@@ -679,7 +689,7 @@ def get_val_dataset(p, transforms):
     
     elif db_name == 'NYUD':
         from data.nyud import NYUD_MT
-        database = NYUD_MT(split='val', transform=transforms, download=False, do_edge='edge' in p.TASKS.NAMES, 
+        database = NYUD_MT(split='val', transform=transforms, download=True, do_edge='edge' in p.TASKS.NAMES, 
                                 do_semseg='semseg' in p.TASKS.NAMES, 
                                 do_normals='normals' in p.TASKS.NAMES, 
                                 do_depth='depth' in p.TASKS.NAMES, overfit=p['overfit'])

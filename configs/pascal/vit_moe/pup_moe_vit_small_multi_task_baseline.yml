@@ -4,8 +4,10 @@ setup: multi_task
 # Database
 train_db_name: PASCALContext
 val_db_name: PASCALContext
-trBatch: 8
-valBatch: 8
+# trBatch = GPU당 배치 사이즈 (총 배치 = trBatch × nproc_per_node)
+# 2080 Ti 11GB × 8장: trBatch 2 → 총 배치 16
+trBatch: 2
+valBatch: 2
 nworkers: 4
 
 # Optimizer and scheduler
