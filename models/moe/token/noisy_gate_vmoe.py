@@ -3,14 +3,12 @@ Noisy gate for gshard and switch
 """
 from fmoe.gates.base_gate import BaseGate
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
-import math
-import numpy as np
-from collections import Counter
-from pdb import set_trace
 
 class TokenNoisyGate_VMoE(BaseGate):
     def __init__(self, d_model, num_expert, world_size, top_k=2, noise_std=1, no_noise=False,

@@ -1,389 +1,30 @@
+import math
+from collections import OrderedDict
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from functools import partial
-import math
-from itertools import repeat
-# from torch._six import container_abcs
-import collections.abc
-import warnings
-from collections import OrderedDict, deque
-from utils.helpers import load_pretrained,load_pretrained_pos_emb
-from models.moe.token.custom_moe_layer import TokenFMoETransformerMLP
-# from .layers import DropPath, to_2tuple, trunc_normal_
-from timm.layers  import lecun_normal_
-# from ..builder import BACKBONES
-import numpy as np
-from collections import Counter
-from models.moe.noisy_gate import NoisyGate
-from models.moe.ckpt.noisy_gate_vmoe import NoisyGate_VMoE
-from models.moe.token.noisy_gate_vmoe import TokenNoisyGate_VMoE
 from torch.utils.checkpoint import checkpoint
 
-from .gates import NoisyGate_VMoE as Custom_VMoE
-from models.moe.moe import TaskMoE
+from utils.helpers import load_pretrained, load_pretrained_pos_emb
 from models.moe.aggregation_stages import AggregationStage
+from models.moe.token.custom_moe_layer import TokenFMoETransformerMLP
+from models.moe.token.noisy_gate_vmoe import TokenNoisyGate_VMoE
 from models.moe.token.relation_conditioned_attention import TaskConditionedAttention
 from models.moe.token.sharing_loss import SharingRegularizationLoss
+from models.moe.token.layers import (
+    default_cfgs, to_2tuple, trunc_normal_, _init_vit_weights,
+    DropPath, Mlp, NormedMlp, Attention, PatchEmbed,
+)
+from models.moe.token.shareability import ShareabilityPredictor, Aggregation
 
-a=[[0],[1,17,18,19,20],[2,12,13,14,15,16],[3,9,10,11],[4,5],[6,7,8,38],[21,22,23,24,25,26,39],[27,28,29,30,31,32,33,34,35,36,37]]
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_NOISE_STD_THRESHOLD = 1e-6
+_EPS = 1e-9
 
-
-class ShareabilityPredictor(nn.Module):
-    def __init__(self, d_model, d_task_emb=0, temperature=1.0, hard=False):
-        """
-        Router selector that determines whether each token uses task-specific or shared gate.
-
-        Args:
-            d_model: Input feature dimension
-            d_task_emb: Task embedding dimension. If > 0, task_emb is expected in forward
-            temperature: Gumbel-Softmax temperature
-            hard: Whether to use hard selection in training
-        """
-        super().__init__()
-        self.d_model = d_model
-        self.d_task_emb = d_task_emb
-        d_input = d_model + d_task_emb if d_task_emb > 0 else d_model
-
-        # Output dimension is 2: [task-specific, shared]
-        self.w_gate = nn.Parameter(
-            torch.zeros(d_input, 2), requires_grad=True
-        )
-        self.temperature = temperature
-        self.hard = hard
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        torch.nn.init.kaiming_uniform_(self.w_gate, a=math.sqrt(5))
-
-    def forward(self, inp, task_emb=None):
-        """
-        Returns selection probabilities/decisions for using shared_gate.
-
-        Args:
-            inp: Input tensor [B, N, D] or [B*N, D]
-            task_emb: Task embedding tensor [E], [B, E], or [B, N, E]
-
-        Returns:
-            Tensor [B, N] or [B*N]: probability or binary selection (0=task-specific, 1=shared)
-        """
-        shape_input = list(inp.shape)
-        original_shape = shape_input[:-1]
-        channel = shape_input[-1]
-        inp_flat = inp.reshape(-1, channel)
-        BN = inp_flat.shape[0]
-
-        assert not (self.d_task_emb > 0 and task_emb is None), (
-            "ShareabilityPredictor requires task_emb when d_task_emb > 0 "
-            "(check task_emb_T_E wiring)."
-        )
-
-        if task_emb is not None:
-            if task_emb.dim() == 1:
-                task_emb_flat = task_emb.unsqueeze(0).expand(BN, -1)
-            elif task_emb.dim() == 2:
-                B = shape_input[0] if len(shape_input) > 1 else 1
-                N = BN // B
-                task_emb_flat = task_emb.unsqueeze(1).expand(B, N, -1).reshape(BN, -1)
-            else:
-                task_emb_flat = task_emb.reshape(BN, -1)
-            gate_inp = torch.cat([inp_flat, task_emb_flat], dim=-1)
-        else:
-            gate_inp = inp_flat
-
-        logits = gate_inp @ self.w_gate
-
-        if self.training:
-            probs = torch.nn.functional.gumbel_softmax(
-                logits, tau=self.temperature, hard=self.hard, dim=-1
-            )
-        else:
-            probs = torch.nn.functional.gumbel_softmax(
-                logits, tau=self.temperature, hard=True, dim=-1
-            )
-
-        output = probs[:, 1]
-
-        if len(original_shape) > 1:
-            output = output.reshape(*original_shape)
-
-        return output
-
-
-class Aggregation(nn.Module):
-    """Aggregates results from multiple tasks"""
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, task_outputs, curr_shared_masks, aggregation_mask):
-        """
-        Args:
-            task_outputs: dict {task_id: [B, N, D]}
-            curr_shared_masks: list of [B, N] bool, len = T
-            aggregation_mask: [B, N] bool
-
-        Returns:
-            aggregated: [B, N, D] (valid only where aggregation_mask == True)
-        """
-        if not aggregation_mask.any():
-            return None
-
-        # [T, B, N, D]
-        outputs = torch.stack(
-            [task_outputs[t] for t in range(len(curr_shared_masks))],
-            dim=0
-        )
-
-        # [T, B, N]
-        shared_mask = torch.stack(curr_shared_masks, dim=0)
-
-        # [T, B, N] → only aggregate where needed
-        valid_mask = shared_mask & aggregation_mask.unsqueeze(0)
-
-        # [T, B, N, 1]
-        valid_mask_f = valid_mask.unsqueeze(-1).float()
-
-        # weighted sum
-        summed = (outputs * valid_mask_f).sum(dim=0)  # [B, N, D]
-
-        # count how many tasks contributed
-        count = valid_mask_f.sum(dim=0)  # [B, N, 1]
-
-        aggregated = summed / (count + self.eps)
-        return aggregated
-def _cfg(url='', **kwargs):
-    return {
-        'url': url,
-        'num_classes': 1000, 'input_size': (3, 224, 224), 'pool_size': None,
-        'crop_pct': .9, 'interpolation': 'bicubic',
-        'mean': (0.485, 0.456, 0.406), 'std': (0.229, 0.224, 0.225),
-        'first_conv': '', 'classifier': 'head',
-        **kwargs
-    }
-
-
-default_cfgs = {
-    # patch models
-    'vit_tiny_patch16_224': _cfg(
-        url = 'https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth',
-    ),
-    'vit_small_patch16_224': _cfg(
-        url = 'https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth',
-        # url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_small_p16_224-15ec54c9.pth',
-    ),
-    'vit_base_patch16_224': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_base_p16_224-4e355ebd.pth',
-    ),
-    'vit_base_patch16_384': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_384-83fb41ba.pth',
-        input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0),
-    'vit_base_patch32_384': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p32_384-830016f5.pth',
-        input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0),
-    'vit_large_patch16_224': _cfg(),
-    'vit_large_patch16_384': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_p16_384-b3be5167.pth',
-        input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0,
-    ),
-    'vit_large_patch32_384': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_p32_384-9b920ba8.pth',
-        input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0),
-    'vit_huge_patch16_224': _cfg(),
-    'vit_huge_patch32_384': _cfg(input_size=(3, 384, 384)),
-    # hybrid models
-    'vit_small_resnet26d_224': _cfg(),
-    'vit_small_resnet50d_s3_224': _cfg(),
-    'vit_base_resnet26d_224': _cfg(),
-    'vit_base_resnet50d_224': _cfg(),
-    'deit_base_distilled_path16_384': _cfg(
-        url='https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_384-d0272ac0.pth',
-        input_size=(3, 384, 384), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), crop_pct=1.0, checkpoint=True,
-    ),
-}
-
-
-def to_2tuple(x):
-    if isinstance(x, collections.abc.Iterable):
-        return x
-    return tuple(repeat(x, 2))
-
-
-class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
-    """
-
-    def __init__(self, drop_prob=None):
-        super(DropPath, self).__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x):
-        if self.drop_prob == 0. or not self.training:
-            return x
-        keep_prob = 1 - self.drop_prob
-        # work with diff dim tensors, not just 2D ConvNets
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = keep_prob + \
-            torch.rand(shape, dtype=x.dtype, device=x.device)
-        random_tensor.floor_()  # binarize
-        output = x.div(keep_prob) * random_tensor
-        return output
-
-
-def _no_grad_trunc_normal_(tensor, mean, std, a, b):
-    # Cut & paste from PyTorch official master until it's in a few official releases - RW
-    # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
-    def norm_cdf(x):
-        # Computes standard normal cumulative distribution function
-        return (1. + math.erf(x / math.sqrt(2.))) / 2.
-
-    if (mean < a - 2 * std) or (mean > b + 2 * std):
-        warnings.warn("mean is more than 2 std from [a, b] in nn.init.trunc_normal_. "
-                      "The distribution of values may be incorrect.",
-                      stacklevel=2)
-
-    with torch.no_grad():
-        # Values are generated by using a truncated uniform distribution and
-        # then using the inverse CDF for the normal distribution.
-        # Get upper and lower cdf values
-        l = norm_cdf((a - mean) / std)
-        u = norm_cdf((b - mean) / std)
-
-        # Uniformly fill tensor with values from [l, u], then translate to
-        # [2l-1, 2u-1].
-        tensor.uniform_(2 * l - 1, 2 * u - 1)
-
-        # Use inverse cdf transform for normal distribution to get truncated
-        # standard normal
-        tensor.erfinv_()
-
-        # Transform to proper mean, std
-        tensor.mul_(std * math.sqrt(2.))
-        tensor.add_(mean)
-
-        # Clamp to ensure it's in the proper range
-        tensor.clamp_(min=a, max=b)
-        return tensor
-
-
-def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    # type: (Tensor, float, float, float, float) -> Tensor
-    r"""Fills the input Tensor with values drawn from a truncated
-    normal distribution. The values are effectively drawn from the
-    normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`
-    with values outside :math:`[a, b]` redrawn until they are within
-    the bounds. The method used for generating the random values works
-    best when :math:`a \leq \text{mean} \leq b`.
-    Args:
-        tensor: an n-dimensional `torch.Tensor`
-        mean: the mean of the normal distribution
-        std: the standard deviation of the normal distribution
-        a: the minimum cutoff value
-        b: the maximum cutoff value
-    Examples:
-        >>> w = torch.empty(3, 5)
-        >>> nn.init.trunc_normal_(w)
-    """
-    return _no_grad_trunc_normal_(tensor, mean, std, a, b)
-
-
-class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        self.drop = nn.Dropout(drop)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
-
-class new_Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., norm_layer= partial(nn.LayerNorm, eps=1e-6)):
-        super().__init__()
-        # out_features = out_features or in_features
-        # hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        self.drop = nn.Dropout(drop)
-        self.norm = norm_layer(out_features)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        x = self.norm(x)
-        return x
-
-class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
-        if qk_scale is None:
-            self.scale = head_dim ** -0.5
-        else:
-            self.scale = qk_scale
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x):
-        B, N, C = x.shape
-        # print('for attention',x.shape)
-        # print(self.scale)
-        q, k, v = self.qkv(x).reshape(B, N, 3, self.num_heads,
-                                      C // self.num_heads).permute(2, 0, 3, 1, 4)
-        # print(q.shape,k.shape,v.shape)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
-    """
-
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
-        super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        num_patches = (img_size[1] // patch_size[1]) * \
-            (img_size[0] // patch_size[0])
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_patches = num_patches
-
-        self.proj = nn.Conv2d(in_chans, embed_dim,
-                              kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        # FIXME look at relaxing size constraints
-        assert H == self.img_size[0] and W == self.img_size[1], \
-            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-
-        # x = F.interpolate(x, size=2*x.shape[-1], mode='bilinear', align_corners=True)
-        x = self.proj(x)
-        return x
 
 class TokenBlock(nn.Module):
 
@@ -578,8 +219,8 @@ class TokenBlock(nn.Module):
             torch.tensor(1.0, device=clean_values.device),
         )
 
-        prob_if_in = normal.cdf((clean_values - threshold_if_in) / (noise_stddev + 1e-9))
-        prob_if_out = normal.cdf((clean_values - threshold_if_out) / (noise_stddev + 1e-9))
+        prob_if_in = normal.cdf((clean_values - threshold_if_in) / (noise_stddev + _EPS))
+        prob_if_out = normal.cdf((clean_values - threshold_if_out) / (noise_stddev + _EPS))
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
     
@@ -642,7 +283,7 @@ class TokenBlock(nn.Module):
 
         importance = gates.sum(0)  # [E]
 
-        noise_ok = (noise_stddev is not None) and (noise_stddev.mean().item() > 1e-6)
+        noise_ok = (noise_stddev is not None) and (noise_stddev.mean().item() > _NOISE_STD_THRESHOLD)
         if (self.moe_top_k < self.tot_expert) and noise_ok:
             load = self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits, self.moe_top_k).sum(0)
         else:
@@ -1151,7 +792,7 @@ class TokenBlock(nn.Module):
                 moe_aux["cv_loss"] = moe_aux["cv_loss"] + self._compute_cv_loss(gate_info)
 
                 gates = gate_info["gates"].float()
-                token_entropy = -(gates * gates.clamp_min(1e-9).log()).sum(dim=-1)
+                token_entropy = -(gates * gates.clamp_min(_EPS).log()).sum(dim=-1)
                 moe_aux["analysis"]["gate_entropy_sum"] += float(token_entropy.sum().item())
                 moe_aux["analysis"]["top1_prob_sum"] += float(gates.max(dim=-1).values.sum().item())
                 moe_aux["analysis"]["gate_token_count"] += int(K)
@@ -1460,7 +1101,7 @@ class TokenVisionTransformerMoE(nn.Module):
         if self.num_tasks <= 0:
             raise ValueError("num_tasks must be > 0 to build task embeddings for routing.")
 
-        self.gate_task_represent = new_Mlp(
+        self.gate_task_represent = NormedMlp(
             in_features=self.num_tasks,
             hidden_features=int(self.gate_task_specific_dim),
             out_features=self.gate_task_specific_dim,
@@ -1752,36 +1393,5 @@ class TokenVisionTransformerMoE(nn.Module):
         return out_dict
 
 
-def _init_vit_weights(m, n: str = '', head_bias: float = 0., jax_impl: bool = False):#
-    """ ViT weight initialization
-    * When called without n, head_bias, jax_impl args it will behave exactly the same
-      as my original init for compatibility with prev hparam / downstream use cases (ie DeiT).
-    * When called w/ valid n (module name) and jax_impl=True, will (hopefully) match JAX impl
-    """
-    if isinstance(m, nn.Linear):
-        if n.startswith('head'):
-            nn.init.zeros_(m.weight)
-            nn.init.constant_(m.bias, head_bias)
-        elif n.startswith('pre_logits'):
-            lecun_normal_(m.weight)
-            nn.init.zeros_(m.bias)
-        else:
-            if jax_impl:
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    if 'mlp' in n:
-                        nn.init.normal_(m.bias, std=1e-6)
-                    else:
-                        nn.init.zeros_(m.bias)
-            else:
-                trunc_normal_(m.weight, std=.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-    elif jax_impl and isinstance(m, nn.Conv2d):
-        # NOTE conv was left to pytorch default in my original init
-        lecun_normal_(m.weight)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-    elif isinstance(m, nn.LayerNorm):
-        nn.init.zeros_(m.bias)
-        nn.init.ones_(m.weight)
+
+# _init_vit_weights is imported from models.moe.token.layers
