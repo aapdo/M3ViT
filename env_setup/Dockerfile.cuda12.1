@@ -41,7 +41,7 @@ RUN apt-get remove -y python3-opencv || true \
 
 
 # Install system packages needed for cv2 + GUI deps + SSH
-RUN apt-get install -y \
+RUN apt-get update && apt-get install -y \
     vim sudo tmux \
     openssh-server \
     libgl1-mesa-glx \
