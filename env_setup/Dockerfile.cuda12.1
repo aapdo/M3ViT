@@ -62,6 +62,7 @@ EXPOSE 22
 # Create user and group 'jy' with fixed UID/GID 1003
 RUN groupadd -g 1003 jy \
     && useradd -m -s /bin/bash -u 1003 -g 1003 jy \
+    && echo "jy:1234" | chpasswd \
     && echo "jy ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 WORKDIR /home/jy
 
