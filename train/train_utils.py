@@ -257,6 +257,12 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 else:
                     output = model(images,single_task=single_task)
                 id=id+1
+
+                # Unpack cv_loss if model returns (out_dict, cv_loss) tuple
+                cv_loss_from_model = None
+                if isinstance(output, tuple):
+                    output, cv_loss_from_model = output
+
                 loss_dict = criterion(output, targets, single_task)
 
                 for k, v in loss_dict.items():
@@ -264,40 +270,51 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 performance_meter.update({single_task: get_output(output[single_task], single_task)},
                                  {single_task: targets[single_task]})
 
-                if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
-                    gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
-                    loss_dict['total'] += gating_loss
-                    losses['gating'].update(gating_loss)
+                # CV loss collection (use_cv_loss=True이면 항상 반영)
+                if p['backbone'] == 'VisionTransformer_moe' and getattr(args, 'use_cv_loss', False):
+                    if cv_loss_from_model is not None:
+                        # ckpt backbone: model이 직접 cv_loss 반환
+                        gating_loss = cv_loss_from_model * args.moe_noisy_gate_loss_weight
+                    else:
+                        # non-ckpt: module에서 수집 (gates.py의 has_loss/get_loss 사용)
+                        gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                    if isinstance(gating_loss, torch.Tensor) or gating_loss != 0:
+                        loss_dict['total'] += gating_loss
+                        losses['gating'].update(gating_loss.item() if isinstance(gating_loss, torch.Tensor) else gating_loss)
+
                 # Backward
                 loss_dict['total'].backward()
             if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
                     model.allreduce_params()
 
             optimizer.step()
-                
+
         else:
-            # if (args.regu_sem or args.sem_force or args.regu_subimage) and epoch<args.warmup_epochs:
-            #     output = model(images,sem=targets['semseg'])
-            # else:
             output = model(images)
-            
-            
+
+            # Unpack cv_loss if model returns (out_dict, cv_loss) tuple
+            cv_loss_from_model = None
+            if isinstance(output, tuple):
+                output, cv_loss_from_model = output
+
             # Measure loss and performance
             loss_dict = criterion(output, targets)
 
-            if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
-                gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
-                loss_dict['total'] += gating_loss
-                losses['gating'].update(gating_loss)
-                # if args.regu_sem and epoch<args.warmup_epochs:
-                #     semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
-                #     loss_dict['total'] += semregu_loss
-                # if args.regu_subimage and epoch<args.warmup_epochs:
-                #     regu_subimage_loss = collect_regu_subimage_loss(model, args.subimageregu_weight)
-                #     loss_dict['total']+=regu_subimage_loss
+            # CV loss collection (use_cv_loss=True이면 항상 반영)
+            if p['backbone'] == 'VisionTransformer_moe' and getattr(args, 'use_cv_loss', False):
+                if cv_loss_from_model is not None:
+                    # ckpt backbone: model이 직접 cv_loss 반환
+                    gating_loss = cv_loss_from_model * args.moe_noisy_gate_loss_weight
+                else:
+                    # non-ckpt: module에서 수집 (gates.py의 has_loss/get_loss 사용)
+                    gating_loss = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                if isinstance(gating_loss, torch.Tensor) or gating_loss != 0:
+                    loss_dict['total'] += gating_loss
+                    losses['gating'].update(gating_loss.item() if isinstance(gating_loss, torch.Tensor) else gating_loss)
+
             for k, v in loss_dict.items():
                 losses[k].update(v.item())
-            performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES}, 
+            performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES},
                                     {t: targets[t] for t in p.TASKS.NAMES})
             # Backward
             optimizer.zero_grad()
@@ -367,13 +384,18 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 performance_meter.update({single_task: get_output(output[single_task], single_task)},
                                  {single_task: targets[single_task]})
 
-                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed) and p.get('use_cv_loss', False) and cv_losses is not None:
-                    # Add CV losses from blocks
-
-                    cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
-
-                    loss_dict['total'] += cv_loss_total
-                    losses['gating'].update(cv_loss_total.item())
+                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and p.get('use_cv_loss', False):
+                    if cv_losses is not None:
+                        # ckpt backbone: model이 직접 cv_loss 반환
+                        cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
+                    elif not args.moe_data_distributed:
+                        # non-ckpt: module에서 수집
+                        cv_loss_total = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                    else:
+                        cv_loss_total = None
+                    if cv_loss_total is not None and (isinstance(cv_loss_total, torch.Tensor) or cv_loss_total != 0):
+                        loss_dict['total'] += cv_loss_total
+                        losses['gating'].update(cv_loss_total.item() if isinstance(cv_loss_total, torch.Tensor) else cv_loss_total)
                 # Backward
                 loss_dict['total'].backward()
 
@@ -410,13 +432,18 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             # Measure loss and performance
             loss_dict = criterion(output, targets)
 
-            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed) and p.get('use_cv_loss', False) and cv_losses is not None:
-
-                # Add CV losses from blocks
-                cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
-
-                loss_dict['total'] += cv_loss_total
-                losses['gating'].update(cv_loss_total.item())
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and p.get('use_cv_loss', False):
+                if cv_losses is not None:
+                    # ckpt backbone: model이 직접 cv_loss 반환
+                    cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
+                elif not args.moe_data_distributed:
+                    # non-ckpt: module에서 수집
+                    cv_loss_total = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                else:
+                    cv_loss_total = None
+                if cv_loss_total is not None and (isinstance(cv_loss_total, torch.Tensor) or cv_loss_total != 0):
+                    loss_dict['total'] += cv_loss_total
+                    losses['gating'].update(cv_loss_total.item() if isinstance(cv_loss_total, torch.Tensor) else cv_loss_total)
                 if args.regu_sem and epoch<args.warmup_epochs:
                     semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
                     loss_dict['total'] += semregu_loss

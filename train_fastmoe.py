@@ -328,7 +328,36 @@ def main():
     print(str(args))
     if args.distributed:
         args.rank = torch.distributed.get_rank()
-    
+
+    # Initialize wandb logger (only on rank 0) — before model creation so config is logged first
+    wandb_logger = WandbLogger(enabled=(args.use_wandb and args.local_rank == 0))
+    if wandb_logger.enabled:
+        from datetime import datetime, timezone, timedelta
+        kst = timezone(timedelta(hours=9))
+        timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M")
+
+        if args.wandb_name is None:
+            wandb_run_name = timestamp
+        else:
+            wandb_run_name = f"{args.wandb_name}_{timestamp}"
+
+        wandb_logger.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=wandb_run_name,
+            config=None  # Will be set by log_config
+        )
+        wandb_logger.log_config(p, args)
+
+        # Save config files to wandb if they exist
+        if config_path and os.path.exists(config_path):
+            wandb.save(config_path)
+        if args.config_exp and os.path.exists(args.config_exp):
+            wandb.save(args.config_exp)
+
+    # Set as global instance
+    set_wandb_logger(wandb_logger)
+
     print(colored('Retrieve model', 'blue'))
     args.moe_use_gate = (args.moe_gate_arch != "")
 
@@ -533,36 +562,6 @@ def main():
             elif task == 'edge':
                 best_result[task] = {'odsF': 0.0}  
     
-    # Initialize wandb logger (only on rank 0)
-    wandb_logger = WandbLogger(enabled=(args.use_wandb and args.local_rank == 0))
-    if wandb_logger.enabled:
-        # Auto-generate run name in KST (UTC+9) if not explicitly provided
-        from datetime import datetime, timezone, timedelta
-        kst = timezone(timedelta(hours=9))
-        timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M")
-
-        if args.wandb_name is None:
-            wandb_run_name = timestamp
-        else:
-            wandb_run_name = f"{args.wandb_name}_{timestamp}"
-
-        wandb_logger.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=wandb_run_name,
-            config=None  # Will be set by log_config
-        )
-        wandb_logger.log_config(p, args)
-
-        # Save config files to wandb if they exist
-        if config_path and os.path.exists(config_path):
-            wandb.save(config_path)
-        if args.config_exp and os.path.exists(args.config_exp):
-            wandb.save(args.config_exp)
-
-    # Set as global instance
-    set_wandb_logger(wandb_logger)
-
     # Main loop
     print(colored('Starting main loop', 'blue'))
 
