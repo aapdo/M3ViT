@@ -10,3 +10,51 @@
 - branch 이름은 컨벤션을 따라라: `<type>/<간결한-설명>` (예: feat/token-moe-shareability, fix/imagenet-label-mapping, refactor/models-directory)
 - branch 이름만 보고 어떤 작업인지 알 수 있도록 의미 있는 이름을 사용해라
 - type: feat, fix, refactor, chore, docs, test 등
+
+## Project Structure
+
+### 사전학습 결과
+- `output_dir/pretrain/deit_small_scratch_hard_r2_a3` — 사전학습 모델 학습 로그 및 결과
+- `output_dir/pretrain/deit_small_scratch_hard_r1_a3` — 사전학습 모델 학습 로그 및 결과
+
+### 모델 코드 (`models/moe/`)
+- `models/moe/origin` — M3ViT 공식 GitHub의 모델 코드를 그대로 가져온 것
+- `models/moe/ckpt` — origin 코드에 VRAM 부족 문제 해결을 위해 gradient checkpointing을 적용한 버전
+- `models/moe/token` — 현재 제안하는 논문에 대한 코드
+  - `run.txt` — 실험 후보 실행 명령어 모음 (실험 시작 시 생성 예정)
+
+## M3ViT 논문 벤치마크 (ViT-small 기준)
+
+### NYUD-v2 (2 tasks)
+| Model | Backbone | Seg. (mIoU)↑ | Depth (rmse)↓ | ∆m (%)↑ |
+|---|---|---|---|---|
+| STL-B | ResNet-50 | 43.9 | 0.585 | 0.00 |
+| MTL-B | ResNet-50 | 44.4 | 0.587 | +0.41 |
+| Cross-Stitch | ResNet-50 | 44.2 | 0.570 | +1.61 |
+| M-ViT (MTL-B) | ViT-small | 40.9 | 0.631 | −6.27 |
+| M3ViT-Single | MoE ViT-small | 45.3 | 0.600 | +0.31 |
+| M3ViT-Multi. | MoE ViT-small | 45.6 | 0.589 | +1.59 |
+| M3ViT-Task-cond. | MoE ViT-small | 45.3 | 0.595 | +0.74 |
+
+### PASCAL-Context (5 tasks)
+| Model | Backbone | Seg. (mIoU)↑ | Norm. (mErr)↓ | H.Parts (mIoU)↑ | Sal. (mIoU)↑ | Edge (odsF)↑ | ∆m (%)↑ |
+|---|---|---|---|---|---|---|---|
+| STL-B | ResNet-18 | 66.2 | 13.9 | 59.9 | 66.3 | 68.8 | 0.00 |
+| MTL-B | ResNet-18 | 63.8 | 14.9 | 58.6 | 65.1 | 69.2 | −2.86 |
+| Cross-Stitch | ResNet-18 | 66.1 | 13.9 | 60.6 | 66.8 | 69.9 | +0.60 |
+| M-ViT (MTL-B) | ViT-small | 70.7 | 15.5 | 58.7 | 64.9 | 68.8 | −1.77 |
+| M3ViT-Single | MoE ViT-small | 71.5 | 14.8 | 61.2 | 65.9 | 71.5 | +1.40 |
+| M3ViT-Multi. | MoE ViT-small | 72.8 | 14.5 | 62.1 | 66.3 | 71.7 | +2.71 |
+| M3ViT-Task-cond. | MoE ViT-small | 72.0 | 14.4 | 61.3 | 65.8 | 71.8 | +2.22 |
+
+### 주요 설정
+- Backbone: DeiT-small (ViT-small variant)
+- MoE: K=4 (top-K), N=16 experts, expert 크기는 standard MLP 대비 1/4
+- Load & importance balancing loss weight: 0.01
+- Multi-gate 방식이 최종 보고 성능 (M2ViT/M3ViT)
+
+## Current Issues
+
+### M3ViT 재현 성능 차이
+- M3ViT 논문에서 제안한 방법대로 사전학습 및 학습을 진행해도, 논문에서 보고한 벤치마크 성능과 큰 차이가 발생함
+- 원인 분석 필요: 하이퍼파라미터, 학습 설정, 데이터 전처리, 모델 구현 차이 등

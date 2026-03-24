@@ -1,5 +1,6 @@
-# Run scripts (local only)
-run.txt
+# Run scripts / logs (local only)
+*.txt
+!env_setup/requirements.txt
 nohup_*.log
 
 # Byte-compiled / optimized / DLL files
@@ -138,8 +139,7 @@ dmypy.json
 Thumbs.db
 
 # Custom
-script.txt
-run.txt
+.claude/
 output_dir/
 wandb/
 ref/

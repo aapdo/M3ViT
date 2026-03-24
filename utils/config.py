@@ -116,6 +116,8 @@ def create_config(env_file, exp_file, local_rank=0, args=None):
         pretrained = args.pretrained != ''
         root_dir = os.path.join(root_dir,'posemb_from_pretrain_%s_moeexperts%s_top%s_pretrained_%s_vmoe_noisy_std%s_lr_%s'\
             %(args.pos_emb_from_pretrained,str(args.moe_experts),str(args.moe_top_k), str(pretrained),str(args.vmoe_noisy_std),str(args.lr)))
+        if hasattr(args, 'wandb_name') and args.wandb_name:
+            root_dir = os.path.join(root_dir, args.wandb_name)
 
     with open(exp_file, 'r') as stream:
         config = yaml.safe_load(stream)

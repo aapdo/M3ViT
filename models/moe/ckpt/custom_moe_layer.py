@@ -211,9 +211,10 @@ class FMoETransformerMLP(FMoE):
             moe_inp = tree.map_structure(slice_func, moe_inp)
 
         if (task_id is not None) and self.multi_gate:
-            # print('in custom moe_layer,task_id',task_id)
-            # (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp)
             (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate[task_id](gate_inp, sem=sem)
+            # 사용되지 않는 gate의 파라미터를 graph에 포함시켜 DDP "marked ready twice" 방지
+            _unused_sum = sum(p.sum() for i, g in enumerate(self.gate) if i != task_id for p in g.parameters())
+            clean_logits = clean_logits + 0.0 * _unused_sum
         else:
             (gate_top_k_idx, gate_score), clean_logits, noisy_logits, noise_stddev, top_logits, gates = self.gate(gate_inp, task_id=task_id,sem=sem)
 

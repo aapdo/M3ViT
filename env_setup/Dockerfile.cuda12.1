@@ -1,12 +1,12 @@
 # NGC PyTorch Docker image with custom requirements
 # Build with: 
-# docker build -t m3vit_leg:260102 -f env_setup/Dockerfile.cuda12.1 .
+# docker build -t m3vit_leg:260323 -f env_setup/Dockerfile.cuda12.1 .
 # Start with:
-# docker run --gpus all --shm-size="120g" -d --name m3vit_leg \
-#     -p 2222:22 \
-#     -v /home/jy/m3vit:/home/jy/m3vit \
-#     -v /data/multi_task_datasets:/home/jy/multi_task_datasets \
-#     m3vit_leg:260102
+# docker run --gpus all --shm-size="120g" -d --name m3vit_ssh \
+#     -p 9795:22 \
+#     -v /home/tako8/share/user-share/jy/m3vit:/home/jy/m3vit \
+#     -v /home/tako8/share/user-share/jy/multi_task_datasets:/home/jy/multi_task_datasets \
+#     m3vit_leg:260323
 #
 # SSH into container:
 #     ssh -p 2222 jy@localhost
@@ -75,6 +75,12 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
 RUN python -m pip install -U typing_extensions
+
+# Install mmcv 1.7.1 (no-build-isolation required for NGC base image)
+RUN python -m pip install --no-build-isolation mmcv==1.7.1
+
+# Fix protobuf/onnx compatibility (NGC onnx uses old protobuf codegen)
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 

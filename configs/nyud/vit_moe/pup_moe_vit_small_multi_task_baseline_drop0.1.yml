@@ -35,7 +35,7 @@ backbone_kwargs:
    num_heads: 12
    num_classes: 40
 
-   drop_rate: 0.
+   drop_rate: 0.1
    pos_embed_interp: True
    align_corners: False
 

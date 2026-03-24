@@ -193,13 +193,16 @@ def get_backbone(p, args=None):
             "tot_experts": int(args.moe_experts) * int(moe_world_size),
             "moe_experts": int(args.moe_experts) * int(moe_world_size),
         })
+        # --pretrained가 주어지면 __init__에서 DeiT 가중치 로딩을 건너뜀
+        random_init = bn_args['random_init'] or (args is not None and bool(args.pretrained))
+
         if args.moe_use_gate:
             gate_model = vits_gate.__dict__[args.moe_gate_arch](num_classes=0)
             backbone = VisionTransformerMoE(model_name=bn_args['model_name'],\
                 img_size=bn_args['img_size'], patch_size=bn_args['patch_size'], in_chans=bn_args['in_chans'], embed_dim=bn_args['embed_dim'], depth=bn_args['depth'],\
                     num_heads=bn_args['num_heads'], num_classes=bn_args['num_classes'], mlp_ratio=bn_args['mlp_ratio'], qkv_bias=bn_args['qkv_bias'], qk_scale=None, representation_size=None, distilled=bn_args['distilled'],\
                         drop_rate=bn_args['drop_rate'], attn_drop_rate=bn_args['attn_drop_rate'], drop_path_rate=bn_args['drop_path_rate'], hybrid_backbone=None, norm_cfg=norm_cfg,\
-                            pos_embed_interp=bn_args['pos_embed_interp'], random_init=bn_args['random_init'], align_corners=bn_args['align_corners'],\
+                            pos_embed_interp=bn_args['pos_embed_interp'], random_init=random_init, align_corners=bn_args['align_corners'],\
                                 act_layer=None, weight_init='', moe_mlp_ratio=bn_args['moe_mlp_ratio'], moe_experts=args.moe_experts, moe_top_k=bn_args['moe_top_k'], world_size=moe_world_size,\
                                     gate_return_decoupled_activation=bn_args['gate_return_decoupled_activation'],gate_dim=gate_model.num_features,)
             backbone = VisionTransformerMoCoWithGate(backbone, gate_model)
@@ -209,7 +212,7 @@ def get_backbone(p, args=None):
                 img_size=bn_args['img_size'], patch_size=bn_args['patch_size'], in_chans=bn_args['in_chans'], embed_dim=bn_args['embed_dim'], depth=bn_args['depth'],\
                     num_heads=bn_args['num_heads'], num_classes=bn_args['num_classes'], mlp_ratio=bn_args['mlp_ratio'], qkv_bias=bn_args['qkv_bias'], qk_scale=None, representation_size=None, distilled=bn_args['distilled'],\
                         drop_rate=bn_args['drop_rate'], attn_drop_rate=bn_args['attn_drop_rate'], drop_path_rate=bn_args['drop_path_rate'], hybrid_backbone=None, norm_cfg=norm_cfg,\
-                            pos_embed_interp=bn_args['pos_embed_interp'], random_init=bn_args['random_init'], align_corners=bn_args['align_corners'],\
+                            pos_embed_interp=bn_args['pos_embed_interp'], random_init=random_init, align_corners=bn_args['align_corners'],\
                                 act_layer=None, weight_init='', moe_mlp_ratio=bn_args['moe_mlp_ratio'], moe_experts=args.moe_experts, moe_top_k=bn_args['moe_top_k'], world_size=moe_world_size, gate_dim=bn_args['gate_dim'],\
                                     gate_return_decoupled_activation=bn_args['gate_return_decoupled_activation'],moe_gate_type=args.moe_gate_type, vmoe_noisy_std=args.vmoe_noisy_std,\
                                         gate_task_specific_dim=args.gate_task_specific_dim, multi_gate=args.multi_gate,
