@@ -322,8 +322,12 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             if p['backbone'] == 'VisionTransformer_moe' and (not args.moe_data_distributed):
                 model.allreduce_params()
             optimizer.step()
-            
-            
+
+            # Free GPU memory - prevent accumulation across iterations
+            del output, loss_dict
+            if 'gating_loss' in locals():
+                del gating_loss
+
         if i % 25 == 0:
             progress.display(i)
             # for name, param in model.named_parameters():
@@ -467,6 +471,13 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 # Synchronize to ensure allreduce is complete before optimizer step
                 torch.cuda.synchronize()
             optimizer.step()
+
+            # Free GPU memory - prevent accumulation across iterations
+            del output, loss_dict
+            if 'cv_losses' in locals() and cv_losses is not None:
+                del cv_losses
+            if 'cv_loss_total' in locals():
+                del cv_loss_total
 
         if i % 25 == 0:
             progress.display(i)
