@@ -1,0 +1,89 @@
+# ============================================================
+# NYUD 실험 계획 (순차 실행)
+# ============================================================
+# 기본 고정: vmoe_noisy_std=0.5, pretrained=r2_a3, moe_data_distributed
+#
+# Phase 1: Regularization
+# | #  | config                       | 목적                         |
+# |----|------------------------------|------------------------------|
+# | 1  | drop0.1_droppath0.1          | drop_rate + drop_path 복합    |
+# | 2  | (Phase1 best) + wd=0.01      | weight_decay 증가 효과        |
+#
+# Phase 2: LR / Schedule  (Phase1 결과 보고 결정)
+# | #  | 변경                          | 목적                         |
+# |----|-------------------------------|------------------------------|
+# | 3  | (Phase1 best) + lr=0.001      | LR 절반                      |
+#
+# Phase 3: Augmentation  (Phase2 결과 보고 결정)
+# | #  | 변경                          | 목적                         |
+# |----|-------------------------------|------------------------------|
+# | 4  | (Phase2 best) + aug 강화      | rotation/scale/colorjitter   |
+#
+# 이미 완료된 실험:
+#   - std=0.5                  (wandb: lzw7djwm)
+#   - std=0.5 + drop_rate=0.1
+#
+# 사용법:
+#   nohup bash models/moe/ckpt/run.txt 1 > nohup_run.log 2>&1 &
+#   bash models/moe/ckpt/run.txt 2   # 2번부터 재개
+# ============================================================
+
+START=${1:-1}
+cd /home/jy/m3vit
+
+COMMON="--moe_gate_type noisy_vmoe \
+    --moe_experts 16 --moe_top_k 4 --moe_mlp_ratio 1 \
+    --moe_data_distributed \
+    --pos_emb_from_pretrained True \
+    --backbone_random_init False \
+    --task_one_hot False \
+    --multi_gate True \
+    --save_dir output_dir \
+    --use_checkpointing True \
+    --trBatch 2 \
+    --vmoe_noisy_std 0.5 \
+    --gate_task_specific_dim -1 \
+    --use_wandb \
+    --wandb_project m3vit_pretrained_nyud"
+
+R2A3="output_dir/pretrained_model/deit_small_scratch_hard_r2_a3/checkpoint_best.pth"
+
+# ============================================================
+# Phase 1: Regularization
+# ============================================================
+
+if [ $START -le 1 ]; then
+echo "===== [EXP 1] drop_rate=0.1 + drop_path=0.1 ====="
+torchrun --nproc_per_node=8 train_fastmoe.py \
+    --config_exp configs/nyud/vit_moe/pup_moe_vit_small_multi_task_baseline_drop0.1_droppath0.1.yml \
+    $COMMON --pretrained $R2A3 \
+    --wandb_name nyud_r2a3_noisy05_drop01_droppath01 || exit 1
+fi
+
+if [ $START -le 2 ]; then
+echo "===== [EXP 2] weight_decay=0.01 ====="
+torchrun --nproc_per_node=8 train_fastmoe.py \
+    --config_exp configs/nyud/vit_moe/pup_moe_vit_small_multi_task_baseline_drop0.1_droppath0.1.yml \
+    $COMMON --pretrained $R2A3 \
+    --weight_decay 0.01 \
+    --wandb_name nyud_r2a3_noisy05_drop01_droppath01_wd001 || exit 1
+fi
+
+# ============================================================
+# Phase 2: LR / Schedule  (Phase 1 결과 보고 추가)
+# ============================================================
+
+if [ $START -le 3 ]; then
+echo "===== [EXP 3] lr=0.001 ====="
+torchrun --nproc_per_node=8 train_fastmoe.py \
+    --config_exp configs/nyud/vit_moe/pup_moe_vit_small_multi_task_baseline_drop0.1_droppath0.1.yml \
+    $COMMON --pretrained $R2A3 \
+    --lr 0.001 \
+    --wandb_name nyud_r2a3_noisy05_drop01_droppath01_lr001 || exit 1
+fi
+
+# ============================================================
+# Phase 3: Augmentation  (Phase 2 결과 보고 추가)
+# ============================================================
+
+echo "===== ALL DONE ====="

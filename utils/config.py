@@ -111,13 +111,9 @@ def create_config(env_file, exp_file, local_rank=0, args=None):
 
     root_dir = os.path.expandvars(os.path.expanduser(root_dir))
 
-    if args is not None and hasattr(args, 'pretrained') and hasattr(args, 'moe_experts'):
-        # Only add MoE-specific subdirectory if MoE arguments are present
-        pretrained = args.pretrained != ''
-        root_dir = os.path.join(root_dir,'posemb_from_pretrain_%s_moeexperts%s_top%s_pretrained_%s_vmoe_noisy_std%s_lr_%s'\
-            %(args.pos_emb_from_pretrained,str(args.moe_experts),str(args.moe_top_k), str(pretrained),str(args.vmoe_noisy_std),str(args.lr)))
-        if hasattr(args, 'wandb_name') and args.wandb_name:
-            root_dir = os.path.join(root_dir, args.wandb_name)
+    # wandb_name is used as the experiment/settings directory name
+    if args is not None and hasattr(args, 'wandb_name') and args.wandb_name:
+        root_dir = os.path.join(root_dir, args.wandb_name)
 
     with open(exp_file, 'r') as stream:
         config = yaml.safe_load(stream)
@@ -216,27 +212,11 @@ def create_config(env_file, exp_file, local_rank=0, args=None):
     else:
         cfg['use_checkpointing'] = False
 
-    # Determine output directory
-    if cfg['setup'] == 'single_task':
-        if args is not None:
-            output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'], cfg['backbone_kwargs']['model_name'], cfg['setup'])
-        else:
-            output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'], cfg['setup'])
-        output_dir = os.path.join(output_dir, cfg.TASKS.NAMES[0])
-
-    elif cfg['setup'] == 'multi_task':
-        if cfg['model'] == 'baseline':
-            if args is not None:
-                output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'], cfg['backbone_kwargs']['model_name'],'multi_task_baseline')
-            else:
-                output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'], 'multi_task_baseline')
-        else:
-            if args is not None:
-                output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'], cfg['backbone_kwargs']['model_name'],cfg['model'])
-            else:
-                output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'], cfg['model'])
+    # Determine output directory: save_dir/wandb_name/dataset/model_name/
+    if args is not None and 'model_name' in cfg.get('backbone_kwargs', {}):
+        output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone_kwargs']['model_name'])
     else:
-        raise NotImplementedError
+        output_dir = os.path.join(root_dir, cfg['train_db_name'], cfg['backbone'])
         
 
     cfg['root_dir'] = root_dir

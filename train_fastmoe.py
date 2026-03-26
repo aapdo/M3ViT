@@ -358,6 +358,56 @@ def main():
     # Set as global instance
     set_wandb_logger(wandb_logger)
 
+    # Append wandb run_id or timestamp to output_dir (all ranks must agree)
+    if args.local_rank == 0:
+        if wandb_logger.enabled and wandb_logger.run is not None:
+            run_id = wandb_logger.run.id
+        else:
+            from datetime import datetime, timezone, timedelta
+            kst = timezone(timedelta(hours=9))
+            run_id = datetime.now(kst).strftime("%Y%m%d_%H%M%S")
+    else:
+        run_id = None
+
+    # Broadcast run_id from rank 0 to all ranks
+    if args.distributed:
+        run_id_list = [run_id]
+        torch.distributed.broadcast_object_list(run_id_list, src=0)
+        run_id = run_id_list[0]
+
+    old_output_dir = p['output_dir']
+    new_output_dir = os.path.join(old_output_dir, run_id)
+
+    if args.local_rank == 0:
+        os.makedirs(new_output_dir, exist_ok=True)
+
+    p['output_dir'] = new_output_dir
+    p['save_dir'] = os.path.join(new_output_dir, 'results')
+    p['checkpoint'] = os.path.join(new_output_dir, 'checkpoint.pth.tar')
+    p['best_model'] = os.path.join(new_output_dir, 'best_model.pth.tar')
+
+    if args.local_rank == 0:
+        os.makedirs(p['save_dir'], exist_ok=True)
+        print(f'Output dir: {new_output_dir}')
+
+        # Redirect logger to new output_dir
+        new_log_path = os.path.join(new_output_dir, 'log_file.txt')
+        old_log_path = os.path.join(old_output_dir, 'log_file.txt')
+        if hasattr(logger, 'file') and logger.file is not None:
+            logger.file.flush()
+            logger.file.close()
+            if os.path.exists(old_log_path):
+                import shutil
+                shutil.move(old_log_path, new_log_path)
+            logger.file = open(new_log_path, 'a')
+
+        # Save executed command
+        with open(os.path.join(new_output_dir, 'command.txt'), 'w') as f:
+            f.write('python ' + ' '.join(sys.argv) + '\n')
+
+    if args.distributed:
+        torch.distributed.barrier()
+
     print(colored('Retrieve model', 'blue'))
     args.moe_use_gate = (args.moe_gate_arch != "")
 

@@ -79,12 +79,22 @@ RUN python -m pip install -U typing_extensions
 # Install mmcv 1.7.1 (no-build-isolation required for NGC base image)
 RUN python -m pip install --no-build-isolation mmcv==1.7.1
 
-# Fix protobuf/onnx compatibility (NGC onnx uses old protobuf codegen)
-ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+# Fix protobuf/onnx compatibility (NGC base ships old onnx with stale _pb2 codegen)
+RUN pip install --no-cache-dir protobuf==4.25.8 onnx==1.20.1
+
+# Install Node.js 22 + Claude Code CLI
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
 USER jy
+
+# Configure wandb MCP for Claude Code
+RUN mkdir -p /home/jy/.claude \
+    && echo '{"mcpServers":{"wandb":{"type":"http","url":"https://mcp.withwandb.com/mcp","headers":{"Authorization":"Bearer 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"}}}}' > /home/jy/.claude.json
 
 # Start sshd in background, then keep container alive
 CMD sudo /usr/sbin/sshd && sleep infinity
