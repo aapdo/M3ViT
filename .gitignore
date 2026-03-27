@@ -1,5 +1,6 @@
 # Run scripts / logs (local only)
 *.txt
+*.out
 !env_setup/requirements.txt
 nohup_*.log
 

@@ -356,6 +356,9 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
     batch_start_time = None
     batch_size = None
 
+    accumulation_steps = getattr(args, 'accumulation_steps', 1)
+    optimizer.zero_grad(set_to_none=True)
+
     for i, batch in enumerate(train_loader):
         batch_start_time = time.time()
         batch = handle_forward_hook_data(args, batch) # Added line
@@ -460,17 +463,15 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 losses[k].update(v.item())
             performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES},
                                     {t: targets[t] for t in p.TASKS.NAMES})
-            # Backward
-            optimizer.zero_grad(set_to_none=True)
-            import sys
-            sys.stdout.flush()
-            loss_dict['total'].backward()
-            sys.stdout.flush()
-            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
-                model.allreduce_params()
-                # Synchronize to ensure allreduce is complete before optimizer step
-                torch.cuda.synchronize()
-            optimizer.step()
+            # Backward with gradient accumulation
+            (loss_dict['total'] / accumulation_steps).backward()
+
+            if (i + 1) % accumulation_steps == 0:
+                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
+                    model.allreduce_params()
+                    torch.cuda.synchronize()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
             # Free GPU memory - prevent accumulation across iterations
             del output, loss_dict
@@ -486,8 +487,9 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             if args.local_rank == 0:
                 allocated = torch.cuda.memory_allocated(args.local_rank) / 1024**3
                 reserved = torch.cuda.memory_reserved(args.local_rank) / 1024**3
-                print(f"[Iter {i}] GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, "
-                      f"Cached but unused: {reserved - allocated:.2f}GB")
+                peak = torch.cuda.max_memory_allocated(args.local_rank) / 1024**3
+                print(f"[Iter {i}] GPU Memory - Reserved: {reserved:.2f}GB, Allocated: {allocated:.2f}GB, "
+                      f"Cached but unused: {reserved - allocated:.2f}GB, Peak: {peak:.2f}GB")
 
             # Log to wandb every 25 iterations
             if wandb_logger is not None:

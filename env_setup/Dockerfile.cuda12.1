@@ -1,12 +1,12 @@
 # NGC PyTorch Docker image with custom requirements
-# Build with: 
-# docker build -t m3vit_leg:260323 -f env_setup/Dockerfile.cuda12.1 .
-# Start with:
-# docker run --gpus all --shm-size="120g" -d --name m3vit_ssh \
+# Build with:
+# docker build -t m3vit_leg:260327 -f env_setup/Dockerfile.cuda12.1 .
+# Start with (GPU 1,2 only — NCCL all-to-all requires per-device mapping):
+# docker run --gpus '"device=1,2"' --shm-size="120g" -d --name m3vit_ssh \
 #     -p 9795:22 \
-#     -v /home/tako8/share/user-share/jy/m3vit:/home/jy/m3vit \
-#     -v /home/tako8/share/user-share/jy/multi_task_datasets:/home/jy/multi_task_datasets \
-#     m3vit_leg:260323
+#     -v /home/tako9/share/user-share/jy/m3vit:/home/jy/m3vit \
+#     -v /home/tako9/share/user-share/jy/multi_task_datasets:/home/jy/multi_task_datasets \
+#     m3vit_leg:260327
 #
 # SSH into container:
 #     ssh -p 2222 jy@localhost

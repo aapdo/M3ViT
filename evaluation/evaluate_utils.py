@@ -333,10 +333,11 @@ def save_model_predictions(p, val_loader, model, args=None):
                         output.update(task_output)
         else:
             # Standard forward pass (for both args=None and one_by_one=False)
-            if use_cv_loss:
-                output, _ = model(inputs)
+            result = model(inputs)
+            if isinstance(result, tuple):
+                output, _ = result
             else:
-                output = model(inputs)
+                output = result
 
         if ii%50==0:
             print('has saved samples',ii,len(val_loader))

@@ -102,6 +102,7 @@ parser.add_argument('--moe_mlp_ratio', default=None, type=int, help='moe experts
 parser.add_argument('--moe_top_k', default=None, type=int, help='top k expert number')
 parser.add_argument('--trBatch', default=None, type=int, help='train batch size')
 parser.add_argument('--valBatch', default=None, type=int, help='validation batch size')
+parser.add_argument('--accumulation_steps', default=1, type=int, help='gradient accumulation steps')
 parser.add_argument('--moe_gate_arch', default="", type=str)
 parser.add_argument('--moe_gate_type', default="noisy", type=str)
 parser.add_argument('--vmoe_noisy_std', default=1, type=float)
@@ -616,7 +617,7 @@ def main():
     print(colored('Starting main loop', 'blue'))
 
     # Initial evaluation before training
-    if start_epoch == 0 and args.dev_test:
+    if start_epoch == 0:
         print(colored('Initial evaluation before training', 'blue'))
         print('Evaluate ...')
         # Temporarily disable forward hooks during evaluation
@@ -624,6 +625,7 @@ def main():
             args.batch_counter['enabled'] = False
 
         save_model_predictions(p, val_dataloader, model, args)
+        torch.cuda.empty_cache()
         if args.distributed:
             torch.distributed.barrier()
         curr_result = eval_all_results(p)
@@ -681,6 +683,7 @@ def main():
                 args.batch_counter['enabled'] = False
 
             save_model_predictions(p, val_dataloader, model, args)
+            torch.cuda.empty_cache()
             if args.distributed:
                 torch.distributed.barrier()
             curr_result = eval_all_results(p)
