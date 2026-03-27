@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from models.moe.noisy_gate import NoisyGate
 from models.moe.ckpt.noisy_gate_vmoe import NoisyGate_VMoE
+from models.moe.origin.noisy_gate_vmoe import NoisyGate_VMoE as Origin_NoisyGate_VMoE
 from models.moe.gates import NoisyGate_VMoE as Custom_NoisyGate_VMoE
 from models.moe.ckpt.custom_moe_layer import FMoETransformerMLP
 import torch.distributed
@@ -200,7 +201,7 @@ def read_specific_group_experts(moe_state_dict, rank, num_experts):
 def collect_noisy_gating_loss(model, weight):
     loss = 0
     for module in model.modules():
-        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE) or isinstance(module, Custom_NoisyGate_VMoE)) and module.has_loss:
+        if (isinstance(module, (NoisyGate, NoisyGate_VMoE, Origin_NoisyGate_VMoE, Custom_NoisyGate_VMoE))) and module.has_loss:
             # print(module)
             loss += module.get_loss()
     return loss * weight
@@ -209,7 +210,7 @@ def collect_noisy_gating_loss(model, weight):
 def collect_semregu_loss(model, weight):
     loss = 0
     for module in model.modules():
-        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE)):
+        if isinstance(module, (NoisyGate, NoisyGate_VMoE, Origin_NoisyGate_VMoE)):
             # print('during collection semregu loss',module.get_semregu_loss())
             loss += module.get_semregu_loss()
     return loss * weight
@@ -217,7 +218,7 @@ def collect_semregu_loss(model, weight):
 def collect_regu_subimage_loss(model, weight):
     loss = 0
     for module in model.modules():
-        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE)):
+        if isinstance(module, (NoisyGate, NoisyGate_VMoE, Origin_NoisyGate_VMoE)):
             # print('during collection semregu loss',module.get_semregu_loss())
             loss += module.get_regu_subimage_loss()
     return loss * weight
@@ -226,7 +227,7 @@ def collect_moe_activation(model, batch_size, activation_suppress="pool", return
     gate_activations = []
     names = []
     for name, module in model.named_modules():
-        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE)) and module.has_activation:
+        if isinstance(module, (NoisyGate, NoisyGate_VMoE, Origin_NoisyGate_VMoE)) and module.has_activation:
             activation = module.get_activation()
             _, c = activation.shape
             activation = activation.reshape(batch_size, -1, c)
@@ -249,7 +250,7 @@ def collect_moe_activation(model, batch_size, activation_suppress="pool", return
 
 def set_moe_mask(model, select_idx_dict):
     for name, module in model.named_modules():
-        if (isinstance(module, NoisyGate) or isinstance(module, NoisyGate_VMoE)):
+        if isinstance(module, (NoisyGate, NoisyGate_VMoE, Origin_NoisyGate_VMoE)):
             module.select_idx = select_idx_dict[name]
 
 class feature_avger(object):

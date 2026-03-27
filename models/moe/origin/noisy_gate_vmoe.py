@@ -141,10 +141,7 @@ class NoisyGate_VMoE(BaseGate):
         return x.float().var() / (x.float().mean() ** 2 + eps)
 
     def set_loss(self, loss):
-        if self.loss is None:
-            self.loss = loss
-        else:
-            self.loss += loss
+        self.loss = loss
     def get_semregu_loss(self):
         return self.semregu_loss
 

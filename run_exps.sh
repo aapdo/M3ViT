@@ -3,7 +3,6 @@ set -e
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # GPU는 컨테이너 레벨에서 device=1,2로 매핑되어 있으므로 별도 설정 불필요
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export TORCHELASTIC_ERROR_FILE=/home/jy/m3vit/torchelastic_error.json
 
 # GPU 모니터링 시작

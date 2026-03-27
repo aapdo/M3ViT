@@ -391,16 +391,13 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 performance_meter.update({single_task: get_output(output[single_task], single_task)},
                                  {single_task: targets[single_task]})
 
-                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and p.get('use_cv_loss', False):
+                # Gating loss: 원본과 동일하게 backbone이 MoE이면 무조건 적용
+                if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                     if cv_losses is not None:
-                        # ckpt backbone: model이 직접 cv_loss 반환
                         cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
-                    elif not args.moe_data_distributed:
-                        # non-ckpt: module에서 수집
-                        cv_loss_total = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
                     else:
-                        cv_loss_total = None
-                    if cv_loss_total is not None and (isinstance(cv_loss_total, torch.Tensor) or cv_loss_total != 0):
+                        cv_loss_total = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                    if isinstance(cv_loss_total, torch.Tensor) or cv_loss_total != 0:
                         loss_dict['total'] += cv_loss_total
                         losses['gating'].update(cv_loss_total.item() if isinstance(cv_loss_total, torch.Tensor) else cv_loss_total)
                 # Backward
@@ -439,30 +436,23 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
             # Measure loss and performance
             loss_dict = criterion(output, targets)
 
-            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and p.get('use_cv_loss', False):
+            # Gating loss: 원본과 동일하게 backbone이 MoE이면 무조건 적용
+            if (p['backbone'] == 'VisionTransformer_moe' or p['backbone'] == 'Token_VisionTransformer_moe') and (not args.moe_data_distributed):
                 if cv_losses is not None:
                     # ckpt backbone: model이 직접 cv_loss 반환
                     cv_loss_total = cv_losses * args.moe_noisy_gate_loss_weight
-                elif not args.moe_data_distributed:
-                    # non-ckpt: module에서 수집
-                    cv_loss_total = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
                 else:
-                    cv_loss_total = None
-                if cv_loss_total is not None and (isinstance(cv_loss_total, torch.Tensor) or cv_loss_total != 0):
+                    # origin backbone: gate module에서 수집
+                    cv_loss_total = collect_noisy_gating_loss(model, args.moe_noisy_gate_loss_weight)
+                if isinstance(cv_loss_total, torch.Tensor) or cv_loss_total != 0:
                     loss_dict['total'] += cv_loss_total
                     losses['gating'].update(cv_loss_total.item() if isinstance(cv_loss_total, torch.Tensor) else cv_loss_total)
-                if args.regu_sem and epoch<args.warmup_epochs:
-                    semregu_loss = collect_semregu_loss(model, args.semregu_loss_weight)
-                    loss_dict['total'] += semregu_loss
-                    losses['semregu'].update(semregu_loss.item() if torch.is_tensor(semregu_loss) else semregu_loss)
-                if args.regu_subimage and epoch<args.warmup_epochs:
-                    regu_subimage_loss = collect_regu_subimage_loss(model, args.subimageregu_weight)
-                    loss_dict['total']+=regu_subimage_loss
-                    losses['regu_subimage'].update(regu_subimage_loss.item() if torch.is_tensor(regu_subimage_loss) else regu_subimage_loss)
+
             for k, v in loss_dict.items():
                 losses[k].update(v.item())
             performance_meter.update({t: get_output(output[t], t) for t in p.TASKS.NAMES},
                                     {t: targets[t] for t in p.TASKS.NAMES})
+
             # Backward with gradient accumulation
             (loss_dict['total'] / accumulation_steps).backward()
 
@@ -473,8 +463,8 @@ def train_vanilla_distributed(args, p, train_loader, model, criterion, optimizer
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-            # Free GPU memory - prevent accumulation across iterations
-            del output, loss_dict
+            # Free GPU memory
+            del model_output, output, loss_dict, images, targets, batch
             if 'cv_losses' in locals() and cv_losses is not None:
                 del cv_losses
             if 'cv_loss_total' in locals():

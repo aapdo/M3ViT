@@ -616,28 +616,6 @@ def main():
     # Main loop
     print(colored('Starting main loop', 'blue'))
 
-    # Initial evaluation before training
-    if start_epoch == 0:
-        print(colored('Initial evaluation before training', 'blue'))
-        print('Evaluate ...')
-        # Temporarily disable forward hooks during evaluation
-        if args.forward_hook and hasattr(args, 'batch_counter'):
-            args.batch_counter['enabled'] = False
-
-        save_model_predictions(p, val_dataloader, model, args)
-        torch.cuda.empty_cache()
-        if args.distributed:
-            torch.distributed.barrier()
-        curr_result = eval_all_results(p)
-
-        # Re-enable forward hooks after evaluation
-        if args.forward_hook and hasattr(args, 'batch_counter'):
-            args.batch_counter['enabled'] = True
-
-        print(colored('Initial evaluation complete', 'blue'))
-        if args.distributed:
-            torch.distributed.barrier()
-
     for epoch in range(start_epoch, p['epochs']):
         epoch_start_time = time.time()
         print(colored('Epoch %d/%d' %(epoch+1, p['epochs']), 'yellow'))
@@ -665,7 +643,10 @@ def main():
         # Evaluate
         # Check if need to perform eval first
         if 'eval_final_10_epochs_only' in p.keys() and p['eval_final_10_epochs_only']: # To speed up -> Avoid eval every epoch, and only test during final 10 epochs.
-            if epoch + 1 > p['epochs']-10:
+            if epoch == 0:
+                # Always evaluate after first epoch
+                eval_bool = True
+            elif epoch + 1 > p['epochs']-10:
                 # Always evaluate during final 10 epochs
                 eval_bool = True
             else:
