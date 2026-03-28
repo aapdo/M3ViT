@@ -15,6 +15,13 @@ mkdir -p "${OUT_DIR}" "${LOG_DIR}"
 
 cd "$(dirname "$0")/.."
 
+# checkpoint_latest.pth 가 있으면 자동으로 resume
+RESUME_ARGS=""
+if [ -f "${OUT_DIR}/checkpoint_latest.pth" ] || [ -f "${OUT_DIR}/checkpoint_latest_rank0.pth" ]; then
+  echo "Resuming from ${OUT_DIR}"
+  RESUME_ARGS="--resume ${OUT_DIR} --wandb-resume auto"
+fi
+
 CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" PYTHONPATH="$(pwd)" \
 torchrun --nproc_per_node="${NPROC}" --module pretrain.train \
   --config pretrain/configs/deit_moe_small.yaml \
@@ -38,4 +45,5 @@ torchrun --nproc_per_node="${NPROC}" --module pretrain.train \
   --use-wandb \
   --wandb-project pretrain_h12 \
   --wandb-name "${RUN_NAME}" \
-  2>&1 | tee "${LOG_DIR}/${RUN_NAME}.log"
+  ${RESUME_ARGS} \
+  2>&1 | tee -a "${LOG_DIR}/${RUN_NAME}.log"
