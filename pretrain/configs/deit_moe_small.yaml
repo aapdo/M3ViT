@@ -35,7 +35,10 @@ backbone_kwargs:
   in_chans: 3
   embed_dim: 384
   depth: 12
-  num_heads: 6
+  # M3ViT 논문 아키텍처에 맞춰 12로 설정 (기존 DeiT-small 기본값은 6).
+  # 사전학습과 finetuning 간 num_heads 불일치(6→12)가
+  # attention 패턴 전이를 방해하여 downstream 성능 저하 원인으로 확인됨.
+  num_heads: 12
   num_classes: 1000
 
   drop_rate: 0.0

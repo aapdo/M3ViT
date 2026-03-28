@@ -13,15 +13,31 @@
 
 ## Project Structure
 
+### 디렉토리 구조
+- `configs/` — 데이터셋별 실험 설정 YAML (nyud, pascal, cityscapes)
+- `data/` — 데이터셋 로더 및 전처리 (nyud.py, pascal_context.py, cityscapes.py, custom_transforms.py)
+- `env_setup/` — Docker 및 환경 설정 파일
+- `evaluation/` — 태스크별 평가 스크립트 (semseg, depth, normals, edge, sal, human_parts)
+- `losses/` — 멀티태스크 loss 함수 및 loss scheme
+- `models/` — 모델 코드 전체
+  - `models/backbones/` — 백본 네트워크 (ResNet, HRNet, ViT, MoE ViT 등)
+  - `models/heads/` — 태스크별 디코더 헤드 (ASPP, ViT upsampling head 등)
+  - `models/mtl_methods/` — 멀티태스크 학습 방법론 (Cross-Stitch, MTAN, PAD-Net, MTI-Net 등)
+  - `models/moe/` — MoE (Mixture of Experts) 관련 코드
+    - `models/moe/origin` — M3ViT 공식 GitHub의 모델 코드를 그대로 가져온 것
+    - `models/moe/ckpt` — origin 코드에 VRAM 부족 문제 해결을 위해 gradient checkpointing을 적용한 버전
+    - `models/moe/token` — 현재 제안하는 논문에 대한 코드
+- `pretrain/` — DeiT 사전학습 코드 (Dense_DeiT 기반)
+- `resources/` — 논문 그림 등 참고 자료
+- `train/` — 학습 유틸리티 (train_utils.py)
+- `utils/` — 공통 유틸리티 (config, MoE 헬퍼, wandb 로거, 데이터 경로 등)
+- `train_fastmoe.py` — 메인 학습 스크립트 (FastMoE 기반)
+- `train_vit.py` — ViT 학습 스크립트 (non-MoE)
+- `run_exps.sh`, `run_after_current.sh` — 실험 실행 셸 스크립트
+
 ### 사전학습 결과
 - `output_dir/pretrain/deit_small_scratch_hard_r2_a3` — 사전학습 모델 학습 로그 및 결과
 - `output_dir/pretrain/deit_small_scratch_hard_r1_a3` — 사전학습 모델 학습 로그 및 결과
-
-### 모델 코드 (`models/moe/`)
-- `models/moe/origin` — M3ViT 공식 GitHub의 모델 코드를 그대로 가져온 것
-- `models/moe/ckpt` — origin 코드에 VRAM 부족 문제 해결을 위해 gradient checkpointing을 적용한 버전
-- `models/moe/token` — 현재 제안하는 논문에 대한 코드
-  - `run.txt` — 실험 후보 실행 명령어 모음 (실험 시작 시 생성 예정)
 
 ## M3ViT 논문 벤치마크 (ViT-small 기준)
 
